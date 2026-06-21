@@ -1,0 +1,27 @@
+{
+  "name": "bronkit-online",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hosted, multi-user remote MCP server for the Bron treasury platform (Streamable HTTP + OAuth connect-with-your-own-JWK).",
+  "license": "MIT",
+  "author": "Ilia Brovkin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elvis-core/bronkit-online.git"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "decimal.js": "10.6.0",
+    "express": "5.2.1",
+    "jose": "5.10.0"
+  }
+}
