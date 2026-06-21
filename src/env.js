@@ -21,8 +21,10 @@ export function port() {
  * runtime — never baked in. For local dev it defaults to http://localhost:<port>.
  */
 export function publicUrl() {
-  const u = process.env.PUBLIC_URL || `http://localhost:${port()}`;
-  return u.replace(/\/+$/, "");
+  const u = (process.env.PUBLIC_URL || `http://localhost:${port()}`).trim();
+  // Strip trailing slashes/dots — a stray FQDN dot or paste artifact would
+  // otherwise leak into every metadata URL and break Claude's URL matching.
+  return u.replace(/[/.]+$/, "");
 }
 
 /** True once PUBLIC_URL is explicitly configured (i.e. after the first deploy). */
