@@ -20,7 +20,7 @@ function mockCtx({ createResp, getSeq = [], quoteResp } = {}) {
     client: {
       async post(path, body) {
         calls.push({ method: "POST", path, body });
-        return createResp;
+        return path.endsWith("/quote") ? quoteResp : createResp;
       },
       async get(path) {
         calls.push({ method: "GET", path });
@@ -36,7 +36,7 @@ function mockCtx({ createResp, getSeq = [], quoteResp } = {}) {
   };
 }
 
-test("quote: previews via POST /intents/quote with query, creates nothing", async () => {
+test("quote: previews via POST /intents/quote with a JSON body, creates nothing", async () => {
   const ctx = mockCtx({ quoteResp: { fromAssetId: "a", toAssetId: "b", toAmount: "99", minToAmount: "98", minPrice: "0.99", solverFeePercent: "0.1", oracleFeePercent: "0.05" } });
   const out = await swapTool.handler(ctx, { action: "quote", fromAssetId: "a", toAssetId: "b", fromAmount: "100" });
   assert.equal(out.action, "quote");
@@ -45,7 +45,9 @@ test("quote: previews via POST /intents/quote with query, creates nothing", asyn
   const call = ctx.calls[0];
   assert.equal(call.method, "POST");
   assert.equal(call.path, "/workspaces/ws-test/intents/quote");
-  assert.deepEqual(call.query, { fromAssetId: "a", toAssetId: "b", fromAmount: "100" });
+  // Must send a JSON body (Bron rejects an empty request entity), not a query string.
+  assert.deepEqual(call.body, { fromAssetId: "a", toAssetId: "b", fromAmount: "100" });
+  assert.equal(call.query, undefined);
   // No /intents (create) call happened.
   assert.ok(!ctx.calls.some((c) => c.path === "/workspaces/ws-test/intents"));
 });

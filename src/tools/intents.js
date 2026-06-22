@@ -203,11 +203,12 @@ export const swapTool = {
     if (action === "quote") {
       if (!a.fromAssetId || !a.toAssetId) throw new Error("quote needs fromAssetId and toAssetId.");
       requireExactlyOneAmount(a);
-      const query = { fromAssetId: a.fromAssetId, toAssetId: a.toAssetId };
-      if (a.fromAmount != null && a.fromAmount !== "") query.fromAmount = a.fromAmount;
-      if (a.toAmount != null && a.toAmount !== "") query.toAmount = a.toAmount;
-      // Indicative quote: POST with query params, creates no on-chain order.
-      const quote = await ctx.client.request({ method: "POST", path: `${ws(ctx)}/intents/quote`, query });
+      const body = { fromAssetId: a.fromAssetId, toAssetId: a.toAssetId };
+      if (a.fromAmount != null && a.fromAmount !== "") body.fromAmount = a.fromAmount;
+      if (a.toAmount != null && a.toAmount !== "") body.toAmount = a.toAmount;
+      // Indicative quote: POST with a JSON body (the API rejects an empty entity),
+      // creates no on-chain order.
+      const quote = await ctx.client.post(`${ws(ctx)}/intents/quote`, body);
       return {
         action: "quote",
         preview: true,
