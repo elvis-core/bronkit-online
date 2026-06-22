@@ -66,4 +66,12 @@ bronkit only ever creates *requests* — Bron's MPC and human approvers execute 
 A withdrawal/transfer can go to one of: an external address (toAddress), a saved address-book record (toAddressBookRecordId), another of the user's own accounts (toAccountId — an internal transfer), or a workspace tag (toWorkspaceTag). Identify the asset by assetId, or by symbol + networkId. feeLevel is slow | medium | fast (default medium); includeFee:true subtracts the fee from the amount sent rather than adding it on top — say which applies in the preview.
 
 ## Staking actions
-bron_tx_staking action is one of: delegate (stake), undelegate (unstake), claim (collect rewards), withdraw (withdraw unbonded). Required: action, accountId, assetId; amount is optional for claim/withdraw. Same preview-first flow as withdrawals — dryRun:true, confirm, then commit.`;
+bron_tx_staking action is one of: delegate (stake), undelegate (unstake), claim (collect rewards), withdraw (withdraw unbonded). Required: action, accountId, assetId; amount is optional for claim/withdraw. Same preview-first flow as withdrawals — dryRun:true, confirm, then commit.
+
+## Scheduled strategies (recurring / triggered auto-prepare)
+The user can set up standing strategies that auto-PREPARE transactions on a schedule or live condition (they still sign each one in the Bron app). Types: dca (time-scheduled swap), idle_to_stake (stake idle balance over a threshold), de_risk (swap to a stable when a price drops). When the user asks to set up / schedule / automate a recurring action ("DCA $10 into ETH every morning", "stake my idle ATOM weekly", "sell to USDC if X drops below Y"):
+1. Call strategy_create with the type + params (gather the required fields, incl. accountId). Note the returned id.
+2. Then call the Cowork tool **create_scheduled_task** on a recurring cadence matching the strategy, with prompt: "Call bronkit strategy_run for strategy <id>. If it prepared any transactions, tell me what and why." (bronkit cannot create the task itself — MCP servers can't call other servers' tools; you, the assistant, make this call.)
+3. Record the task id back with strategy_update(strategyId, scheduledTaskId).
+Tell the user both halves were created, that firing happens while their computer + Claude are available, and that they sign each prepared tx in the Bron app (swaps have a short signing window).
+For "list / pause / delete my strategies": call strategy_list / strategy_set_enabled / strategy_delete, AND pause or delete the linked Cowork task (the strategy's scheduledTaskId). strategy_run is for the scheduled task to call each cycle — don't call it directly unless the user asks to run a strategy now.`;

@@ -62,13 +62,14 @@ const listTool = {
 const updateTool = {
   name: "strategy_update",
   title: "Update a strategy",
-  description: "Update a strategy's params and/or enabled flag. Provided params are merged with the existing ones and re-validated against the type. " + PARAMS_HELP,
+  description: "Update a strategy's params, enabled flag, and/or scheduledTaskId. Provided params are merged with the existing ones and re-validated against the type. The skill records the Cowork task id here via scheduledTaskId so pause/delete can update both halves. " + PARAMS_HELP,
   inputSchema: {
     type: "object",
     properties: {
       strategyId: { type: "string" },
       params: { type: "object", description: PARAMS_HELP, additionalProperties: true },
       enabled: { type: "boolean" },
+      scheduledTaskId: { type: "string", description: "Id of the Cowork scheduled task that fires this strategy (set by the orchestration skill after create_scheduled_task)." },
     },
     required: ["strategyId"],
     additionalProperties: false,
@@ -86,6 +87,7 @@ const updateTool = {
       patch.trigger = trigger;
     }
     if (a.enabled !== undefined) patch.enabled = a.enabled;
+    if (a.scheduledTaskId !== undefined) patch.scheduledTaskId = a.scheduledTaskId;
     return ctx.store.updateStrategy(ctx.userId, a.strategyId, patch);
   },
 };
@@ -129,16 +131,16 @@ const setEnabledTool = {
   },
 };
 
-const fireTool = {
-  name: "strategy_fire",
-  title: "Fire a strategy (re-check condition, prepare txs)",
+const runTool = {
+  name: "strategy_run",
+  title: "Run a strategy (re-check condition, prepare txs)",
   description:
-    "Evaluate one or more strategies against LIVE data and, if the trigger is tripped, PREPARE the transaction(s) — each appears in the Bron app to sign. This is what a Cowork scheduled task calls when a strategy is due; it never acts on stored numbers (it re-reads the live balance/price each run). SAFE TO CALL — preparing does not move funds; signing is on the phone (MPC). Pass strategyId for one, or strategyIds for a batch (each fired independently — one failing does not abort the others, and no prepared tx assumes a prior one settled).",
+    "Evaluate one or more strategies against LIVE data and, if the trigger is tripped, PREPARE the transaction(s) — each appears in the Bron app to sign. This is what a Cowork scheduled task calls each cycle; it never acts on stored numbers (it re-reads the live balance/price every run). SAFE TO CALL — preparing does not move funds; signing is on the phone (MPC). Pass strategyId for one, or strategyIds for a batch (each run independently — one failing does not abort the others, and no prepared tx assumes a prior one settled).",
   inputSchema: {
     type: "object",
     properties: {
-      strategyId: { type: "string", description: "Fire a single strategy" },
-      strategyIds: { type: "array", items: { type: "string" }, description: "Fire several strategies in one call, each independently" },
+      strategyId: { type: "string", description: "Run a single strategy" },
+      strategyIds: { type: "array", items: { type: "string" }, description: "Run several strategies in one call, each independently" },
     },
     additionalProperties: false,
   },
@@ -146,7 +148,7 @@ const fireTool = {
   handler: async (ctx, a = {}) => {
     need(ctx);
     const ids = a.strategyIds && a.strategyIds.length ? a.strategyIds : a.strategyId ? [a.strategyId] : [];
-    if (ids.length === 0) throw new Error("strategy_fire needs strategyId or strategyIds");
+    if (ids.length === 0) throw new Error("strategy_run needs strategyId or strategyIds");
 
     const results = [];
     for (const id of ids) {
@@ -172,4 +174,4 @@ const fireTool = {
   },
 };
 
-export const strategyTools = [createTool, listTool, updateTool, deleteTool, setEnabledTool, fireTool];
+export const strategyTools = [createTool, listTool, updateTool, deleteTool, setEnabledTool, runTool];

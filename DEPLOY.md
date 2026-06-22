@@ -124,41 +124,40 @@ docker run ... -v bronkit-data:/app/data -e STORE_PATH=/app/data/store.json bron
 
 ---
 
-## 7. Scheduled strategies (Cowork wiring)
+## 7. Scheduled strategies (skill-driven, fired by Cowork tasks)
 
-A **strategy** is stored config the user sets once via chat. When its trigger
-fires, the server PREPARES transaction(s); each lands in the Bron app to sign.
-The stored strategy is standing authorisation to **prepare** — never to sign
-(signing stays on the phone, MPC). The server does **not** run its own cron:
-**a Claude Cowork scheduled task is the clock.**
+A **strategy** is stored config the user sets up in chat. When its trigger fires,
+the server PREPARES transaction(s); each lands in the Bron app to sign. Standing
+authorisation to **prepare** — never to sign (signing stays on the phone, MPC).
 
-**Pieces:**
-- The server stores strategies per user (in the same volume-backed store) and
-  exposes `strategy_create / strategy_list / strategy_update / strategy_delete /
-  strategy_set_enabled`, plus **`strategy_fire`** — which re-reads the **live**
-  balance/price, decides, and prepares via the existing tools (`bron_tx_swap`,
-  `bron_tx_staking`). It never acts on stored numbers.
-- A **Cowork scheduled task** calls `strategy_fire` on a schedule. That task is
-  the only clock.
+**The split (important):** an MCP server cannot call another server's tools, so
+bronkit cannot create a Cowork scheduled task itself. The orchestration is in two
+halves:
+- **bronkit-online** stores strategies and exposes the tools:
+  `strategy_create / list / update / delete / set_enabled`, plus **`strategy_run`**
+  — which re-reads the **live** balance/price, decides, and prepares via
+  `bron_tx_swap` / `bron_tx_staking`. It never acts on stored numbers.
+- **Claude**, guided by the committed skill
+  [`.claude/skills/bronkit-strategies`](.claude/skills/bronkit-strategies/SKILL.md),
+  is what calls the Cowork tool **`create_scheduled_task`**. The scheduled task's
+  prompt then calls `strategy_run` each cycle. The same orchestration is also
+  embedded in the MCP `instructions` so it reaches users connecting via the
+  connector (who don't have the repo skill loaded).
 
-**Set one up:**
-1. In Claude (with the bronkit connector), create the strategy in chat — e.g.
-   *"DCA $10 USDC→ETH from account X every morning"* → `strategy_create` returns a
-   strategy `id`.
-2. Create a Cowork scheduled task (e.g. via the `schedule` skill /
-   `create_scheduled_task`) on the desired cadence, with a prompt like:
+**The user never touches the Cowork UI.** They just ask in chat — e.g. *"DCA $10
+USDC→ETH from account X every morning"* — and the skill/instructions drive Claude to:
+1. `strategy_create` → store it, get an `id`;
+2. `create_scheduled_task` (recurring, cadence from the strategy) with prompt
+   *"Call bronkit strategy_run for strategy <id>. If it prepared any transactions,
+   tell me what and why. Do not sign anything."*;
+3. `strategy_update(strategyId, scheduledTaskId)` → link the two halves so
+   pause/delete updates both.
 
-   > Using the **bronkit** connector, call `strategy_fire` with
-   > `strategyId: "<the id>"`. Report what it prepared (intent/tx ids, or why it
-   > didn't fire). Do not sign anything.
+On each fire, `strategy_run` re-checks the live condition and, if tripped, prepares
+the transaction(s) — each appears in the Bron app to sign with a rationale (which
+strategy, the trigger value) in the description. Batches are independent.
 
-3. On each run the task calls `strategy_fire` → the server re-checks the live
-   condition and, if tripped, prepares the transaction(s). Each appears in the
-   Bron app to sign, with a rationale (which strategy, the trigger value) in the
-   description. Batches are independent — one prepared tx never assumes a prior
-   one settled.
-
-**Strategy types** (all on existing primitives — no derivatives/lending):
+**Strategy types** (existing primitives only — no derivatives/lending):
 - `dca` — time schedule → swap a fixed amount A→B. params: `accountId,
   fromAssetId, toAssetId, amount, schedule`.
 - `idle_to_stake` — when live idle balance exceeds a threshold, stake the excess.
@@ -166,10 +165,11 @@ The stored strategy is standing authorisation to **prepare** — never to sign
 - `de_risk` — when a live price drops to/below a level, swap to a stable. params:
   `accountId, assetId, triggerPrice, toAssetId, and one of amount | percent`.
 
-Cadence/threshold/price live in the strategy; the cron expression you give the
-Cowork task should match the strategy's `schedule`. For price/idle strategies,
-poll cadence is your choice — `strategy_fire` re-reads the condition each run, so
-running more often just checks more often.
+**Constraints (honest):** firing only happens while the user's computer + Claude
+are available (no server-side 24/7 worker yet); and swaps have a short signing
+window, so a scheduled swap still needs the user to sign promptly on the phone.
+The Cowork scheduled task must also have the bronkit connector available at run
+time — verify with one real run.
 
 ---
 

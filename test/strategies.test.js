@@ -68,6 +68,16 @@ test("CRUD: create / list / update / enable / delete; per-user scoping", () => {
   assert.equal(T.strategy_list.handler(ctx).strategies.length, 0);
 });
 
+test("scheduledTaskId links the strategy to its Cowork task (for pause/delete)", () => {
+  const ctx = freshCtx();
+  const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
+  assert.equal(s.scheduledTaskId, null);
+  const linked = T.strategy_update.handler(ctx, { strategyId: s.id, scheduledTaskId: "task-123" });
+  assert.equal(linked.scheduledTaskId, "task-123");
+  // Survives a store reload and is visible in list (so the skill can find the task).
+  assert.equal(T.strategy_list.handler(ctx).strategies[0].scheduledTaskId, "task-123");
+});
+
 test("validation: rejects bad params per type", () => {
   const ctx = freshCtx();
   assert.throws(() => T.strategy_create.handler(ctx, { type: "dca", params: { fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "x" } }), /accountId/);
@@ -78,7 +88,7 @@ test("validation: rejects bad params per type", () => {
 test("dca fire: prepares a swap, signable tx created, rationale in description, lastFiredAt set", async () => {
   const ctx = freshCtx({ intentGet: PRICED_INTENT });
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
-  const out = await T.strategy_fire.handler(ctx, { strategyId: s.id });
+  const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
 
   assert.equal(out.fired, true);
   assert.equal(out.prepared.length, 1);
@@ -96,7 +106,7 @@ test("idle_to_stake fire: re-reads LIVE idle; fires only when above threshold", 
   // Live idle (100) > threshold (40) → stake the excess (60).
   const ctxHi = freshCtx({ balances: [{ accountId: "acc1", assetId: "ATOM", totalBalance: "100", withdrawableBalance: "100" }] });
   const sHi = T.strategy_create.handler(ctxHi, { type: "idle_to_stake", params: { accountId: "acc1", assetId: "ATOM", threshold: "40" } });
-  const hi = await T.strategy_fire.handler(ctxHi, { strategyId: sHi.id });
+  const hi = await T.strategy_run.handler(ctxHi, { strategyId: sHi.id });
   assert.equal(hi.fired, true);
   assert.equal(hi.conditionValue, "100");
   const stakeCall = ctxHi.client.calls.find((c) => c.method === "POST" && c.path.endsWith("/transactions"));
@@ -107,7 +117,7 @@ test("idle_to_stake fire: re-reads LIVE idle; fires only when above threshold", 
   // Same stored threshold, but live idle (30) <= threshold → does NOT fire.
   const ctxLo = freshCtx({ balances: [{ accountId: "acc1", assetId: "ATOM", totalBalance: "30", withdrawableBalance: "30" }] });
   const sLo = T.strategy_create.handler(ctxLo, { type: "idle_to_stake", params: { accountId: "acc1", assetId: "ATOM", threshold: "40" } });
-  const lo = await T.strategy_fire.handler(ctxLo, { strategyId: sLo.id });
+  const lo = await T.strategy_run.handler(ctxLo, { strategyId: sLo.id });
   assert.equal(lo.fired, false);
   assert.equal(lo.conditionValue, "30");
   assert.ok(!ctxLo.client.calls.some((c) => c.path.endsWith("/transactions")), "nothing prepared");
@@ -121,7 +131,7 @@ test("de_risk fire: fires on LIVE price drop; percent sizes from LIVE holding", 
     intentGet: PRICED_INTENT,
   });
   const s = T.strategy_create.handler(ctx, { type: "de_risk", params: { accountId: "acc1", assetId: "AVOL", triggerPrice: "1.0", toAssetId: "USDC", percent: "50" } });
-  const out = await T.strategy_fire.handler(ctx, { strategyId: s.id });
+  const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
   assert.equal(out.fired, true);
   assert.equal(out.conditionValue, "0.5");
   const intentCreate = ctx.client.calls.find((c) => c.method === "POST" && c.path.endsWith("/intents"));
@@ -130,7 +140,7 @@ test("de_risk fire: fires on LIVE price drop; percent sizes from LIVE holding", 
   // price above trigger → no fire.
   const ctx2 = freshCtx({ prices: [{ baseAssetId: "AVOL", quoteSymbolId: "s09", price: "2" }], intentGet: PRICED_INTENT });
   const s2 = T.strategy_create.handler(ctx2, { type: "de_risk", params: { accountId: "acc1", assetId: "AVOL", triggerPrice: "1.0", toAssetId: "USDC", amount: "5" } });
-  const out2 = await T.strategy_fire.handler(ctx2, { strategyId: s2.id });
+  const out2 = await T.strategy_run.handler(ctx2, { strategyId: s2.id });
   assert.equal(out2.fired, false);
   assert.ok(!ctx2.client.calls.some((c) => c.path.endsWith("/intents")), "no intent created");
 });
@@ -138,7 +148,7 @@ test("de_risk fire: fires on LIVE price drop; percent sizes from LIVE holding", 
 test("batched fire: each strategy independent; one bad id does not abort the rest", async () => {
   const ctx = freshCtx({ intentGet: PRICED_INTENT });
   const a = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "x" } });
-  const out = await T.strategy_fire.handler(ctx, { strategyIds: [a.id, "does-not-exist"] });
+  const out = await T.strategy_run.handler(ctx, { strategyIds: [a.id, "does-not-exist"] });
   assert.ok(Array.isArray(out.results) && out.results.length === 2);
   assert.equal(out.results[0].fired, true);
   assert.equal(out.results[1].error, "not found");
@@ -147,7 +157,7 @@ test("batched fire: each strategy independent; one bad id does not abort the res
 test("disabled strategy is skipped on fire", async () => {
   const ctx = freshCtx();
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "x" }, enabled: false });
-  const out = await T.strategy_fire.handler(ctx, { strategyId: s.id });
+  const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
   assert.equal(out.skipped, "disabled");
   assert.ok(!ctx.client.calls.some((c) => c.method === "POST"), "nothing prepared");
 });

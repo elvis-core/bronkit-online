@@ -112,6 +112,7 @@ export class FileStore {
       trigger: trigger || null,
       enabled: true,
       lastFiredAt: null,
+      scheduledTaskId: null, // the Cowork task that fires this strategy (set by the skill)
       createdAt: new Date().toISOString(),
     };
     this.state.strategies[id] = s;
@@ -135,6 +136,7 @@ export class FileStore {
     if (patch.params !== undefined) s.params = patch.params;
     if (patch.trigger !== undefined) s.trigger = patch.trigger;
     if (patch.enabled !== undefined) s.enabled = !!patch.enabled;
+    if (patch.scheduledTaskId !== undefined) s.scheduledTaskId = patch.scheduledTaskId;
     this._save();
     return s;
   }
