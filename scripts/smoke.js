@@ -66,6 +66,13 @@ function startMock(port) {
       if (/^\/workspaces\/[^/]+\/balances$/.test(p))
         return json({ balances: [{ accountId: "acc1", assetId: "a-usdc", symbol: "USDC", networkId: "ETH", totalBalance: "1000", withdrawableBalance: "1000" }] });
       if (p === "/dictionary/asset-market-prices") return json({ prices: [{ baseAssetId: "a-usdc", quoteSymbolId: "s09", price: "1" }] });
+      // Intents (swap) endpoints — quote first (it also matches the /:id shape).
+      if (/^\/workspaces\/[^/]+\/intents\/quote$/.test(p))
+        return json({ fromAssetId: "a-usdc", toAssetId: "a-eth", fromAmount: "100", toAmount: "0.03", minToAmount: "0.0299", minPrice: "0.000299", solverFeePercent: "0.1", oracleFeePercent: "0.05" });
+      if (/^\/workspaces\/[^/]+\/intents$/.test(p))
+        return json({ status: "user-initiated", fromAmount: "100", toAmount: "0.03" });
+      if (/^\/workspaces\/[^/]+\/intents\/[^/]+$/.test(p))
+        return json({ status: "wait-for-user-tx", fromAmount: "100", toAmount: "0.03", price: "0.0003", userSettlementDeadline: Date.now() + 120000 });
       res.writeHead(404); res.end("{}");
     });
     srv.listen(port, () => resolve(srv));
@@ -154,7 +161,8 @@ async function runUser(base, mockBase, jwk, wsId, expectKid, label) {
   ok(typeof init.body.result?.instructions === "string" && init.body.result.instructions.length > 100, "initialize carries the instructions block");
 
   const list = await rpc(base, tok.access_token, 2, "tools/list", {});
-  ok(Array.isArray(list.body.result?.tools) && list.body.result.tools.length === 22, `tools/list → 22 tools (got ${list.body.result?.tools?.length})`);
+  ok(Array.isArray(list.body.result?.tools) && list.body.result.tools.length === 23, `tools/list → 23 tools (got ${list.body.result?.tools?.length})`);
+  ok(list.body.result.tools.some((t) => t.name === "bron_tx_swap"), "bron_tx_swap is present");
 
   bronCalls = []; // isolate this user's downstream Bron calls
   const call = await rpc(base, tok.access_token, 3, "tools/call", { name: "bron_accounts_overview", arguments: {} });
@@ -168,6 +176,19 @@ async function runUser(base, mockBase, jwk, wsId, expectKid, label) {
   ok(bronCalls.length > 0, "the tool call actually hit (mock) Bron");
   const kids = [...new Set(bronCalls.map((c) => c.kid))];
   ok(kids.length === 1 && kids[0] === expectKid, `all ${bronCalls.length} Bron calls signed with ${expectKid} (saw ${kids.join(",")})`);
+
+  // Swap (intent) tool: create → bounded poll reports transitions, surfaces the
+  // user-action stage + settlement deadline, all signed with this user's key.
+  bronCalls = [];
+  const swap = await rpc(base, tok.access_token, 4, "tools/call", { name: "bron_tx_swap", arguments: { action: "create", accountId: "acc1", fromAssetId: "a-usdc", toAssetId: "a-eth", fromAmount: "100", maxWaitSeconds: 5 } });
+  let sp = {};
+  try { sp = JSON.parse(swap.body.result?.content?.[0]?.text || "{}"); } catch { /* leave empty */ }
+  ok(!!sp.intentId, "swap create returned an intent id");
+  ok(sp.status === "wait-for-user-tx" && sp.userActionRequired === true, "swap surfaced the wait-for-user-tx user-action stage (not fire-and-forget)");
+  ok(!!sp.userSettlementDeadline && typeof sp.userSettlementDeadline.epochMs === "number", "swap surfaced the settlement deadline");
+  ok(Array.isArray(sp.statusTimeline) && sp.statusTimeline.length >= 2, `swap reported status transitions (${sp.statusTimeline?.map((t) => t.status).join(" → ")})`);
+  const swapKids = [...new Set(bronCalls.map((c) => c.kid))];
+  ok(swapKids.length === 1 && swapKids[0] === expectKid, `swap Bron calls signed with ${expectKid}`);
 
   return { token: tok.access_token };
 }
@@ -189,6 +210,7 @@ const child = spawn("node", ["src/server.js"], {
     BRONKIT_MASTER_KEY: "smoke-master-key",
     OAUTH_SIGNING_SECRET: "smoke-signing-secret",
     STORE_PATH: storePath,
+    BRONKIT_POLL_INTERVAL_MS: "0", // no real-time delays in the bounded swap poll
   },
   stdio: ["ignore", "inherit", "inherit"],
 });
