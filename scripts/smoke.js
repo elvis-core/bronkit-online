@@ -164,8 +164,9 @@ async function runUser(base, mockBase, jwk, wsId, expectKid, label) {
   ok(typeof init.body.result?.instructions === "string" && init.body.result.instructions.length > 100, "initialize carries the instructions block");
 
   const list = await rpc(base, tok.access_token, 2, "tools/list", {});
-  ok(Array.isArray(list.body.result?.tools) && list.body.result.tools.length === 23, `tools/list → 23 tools (got ${list.body.result?.tools?.length})`);
+  ok(Array.isArray(list.body.result?.tools) && list.body.result.tools.length === 29, `tools/list → 29 tools (got ${list.body.result?.tools?.length})`);
   ok(list.body.result.tools.some((t) => t.name === "bron_tx_swap"), "bron_tx_swap is present");
+  ok(list.body.result.tools.some((t) => t.name === "strategy_fire"), "strategy tools are present");
 
   bronCalls = []; // isolate this user's downstream Bron calls
   const call = await rpc(base, tok.access_token, 3, "tools/call", { name: "bron_accounts_overview", arguments: {} });
@@ -194,6 +195,19 @@ async function runUser(base, mockBase, jwk, wsId, expectKid, label) {
   ok(bronCalls.some((c) => /\/transactions$/.test(c.path)), "swap hit POST /transactions for the signable tx");
   const swapKids = [...new Set(bronCalls.map((c) => c.kid))];
   ok(swapKids.length === 1 && swapKids[0] === expectKid, `swap Bron calls (incl. signable tx) signed with ${expectKid}`);
+
+  // Strategy layer: create a dca strategy, list it, fire it → prepares a swap
+  // (signable tx) through the full pipeline. Per-user (scoped to this token).
+  const sc = await rpc(base, tok.access_token, 5, "tools/call", { name: "strategy_create", arguments: { type: "dca", params: { accountId: "acc1", fromAssetId: "a-usdc", toAssetId: "a-eth", amount: "10", schedule: "0 9 * * *" } } });
+  const strat = JSON.parse(sc.body.result.content[0].text);
+  ok(!!strat.id && strat.enabled === true && strat.trigger.kind === "schedule", "strategy_create returned an enabled dca strategy");
+  const sl = await rpc(base, tok.access_token, 6, "tools/call", { name: "strategy_list", arguments: {} });
+  ok(JSON.parse(sl.body.result.content[0].text).strategies.length === 1, "strategy_list shows the strategy (per-user)");
+  const sf = await rpc(base, tok.access_token, 7, "tools/call", { name: "strategy_fire", arguments: { strategyId: strat.id } });
+  const fired = JSON.parse(sf.body.result.content[0].text);
+  ok(fired.fired === true && fired.prepared?.[0]?.kind === "swap", "strategy_fire prepared a swap");
+  ok(fired.prepared[0].result?.signableTransactionId === "tx-smoke-1", "fired strategy created a signable tx with rationale");
+  ok(/strategy/.test(fired.prepared[0].description || ""), "prepared tx carries a rationale description");
 
   return { token: tok.access_token };
 }

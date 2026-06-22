@@ -1,0 +1,175 @@
+// Conversational management + firing for scheduled strategies. CRUD tools let
+// Claude set/manage strategies in chat; strategy_fire is what the Cowork
+// scheduled task (the clock) calls when a strategy is due — it re-reads the live
+// condition and prepares the transaction(s). Strategies are scoped to the
+// caller's user identity (ctx.userId), persisted in ctx.store.
+
+import { STRATEGY_TYPES, validateStrategy, fireStrategy } from "../strategies.js";
+
+const CONFIG = { readOnlyHint: false, destructiveHint: false, openWorldHint: false }; // local store, reversible
+const READ = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+// Firing prepares transactions on Bron (signing-required), gated by MPC downstream.
+const REQUEST_ONLY = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
+
+function need(ctx) {
+  if (!ctx || !ctx.store || !ctx.userId) throw new Error("strategy tools require an authenticated user context");
+}
+
+const PARAMS_HELP =
+  "Type-specific params (validated): " +
+  "dca = {accountId, fromAssetId, toAssetId, amount, schedule}; " +
+  "idle_to_stake = {accountId, assetId, threshold}; " +
+  "de_risk = {accountId, assetId, triggerPrice, toAssetId, and exactly one of amount | percent}.";
+
+const createTool = {
+  name: "strategy_create",
+  title: "Create a strategy",
+  description:
+    "Create a standing strategy that PREPARES transactions automatically when its trigger fires (a Cowork scheduled task is the clock). Standing authorisation to prepare only — signing always happens on the phone. Types: dca (time-scheduled swap), idle_to_stake (stake idle balance over a threshold), de_risk (swap to stable when a price drops). " +
+    PARAMS_HELP,
+  inputSchema: {
+    type: "object",
+    properties: {
+      type: { type: "string", enum: STRATEGY_TYPES, description: "dca | idle_to_stake | de_risk" },
+      params: { type: "object", description: PARAMS_HELP, additionalProperties: true },
+      enabled: { type: "boolean", description: "Start enabled (default true)" },
+    },
+    required: ["type", "params"],
+    additionalProperties: false,
+  },
+  annotations: CONFIG,
+  handler: (ctx, a = {}) => {
+    need(ctx);
+    const { trigger } = validateStrategy(a.type, a.params || {}); // throws on invalid params
+    const s = ctx.store.createStrategy(ctx.userId, { type: a.type, params: a.params, trigger });
+    if (a.enabled === false) ctx.store.setStrategyEnabled(ctx.userId, s.id, false);
+    return ctx.store.getStrategy(ctx.userId, s.id);
+  },
+};
+
+const listTool = {
+  name: "strategy_list",
+  title: "List strategies",
+  description: "List the user's strategies (id, type, params, trigger, enabled, lastFiredAt). Read-only.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  annotations: READ,
+  handler: (ctx) => {
+    need(ctx);
+    return { strategies: ctx.store.listStrategies(ctx.userId) };
+  },
+};
+
+const updateTool = {
+  name: "strategy_update",
+  title: "Update a strategy",
+  description: "Update a strategy's params and/or enabled flag. Provided params are merged with the existing ones and re-validated against the type. " + PARAMS_HELP,
+  inputSchema: {
+    type: "object",
+    properties: {
+      strategyId: { type: "string" },
+      params: { type: "object", description: PARAMS_HELP, additionalProperties: true },
+      enabled: { type: "boolean" },
+    },
+    required: ["strategyId"],
+    additionalProperties: false,
+  },
+  annotations: CONFIG,
+  handler: (ctx, a = {}) => {
+    need(ctx);
+    const existing = ctx.store.getStrategy(ctx.userId, a.strategyId);
+    if (!existing) throw new Error(`strategy not found: ${a.strategyId}`);
+    const patch = {};
+    if (a.params !== undefined) {
+      const merged = { ...existing.params, ...a.params };
+      const { trigger } = validateStrategy(existing.type, merged); // re-validate full set
+      patch.params = merged;
+      patch.trigger = trigger;
+    }
+    if (a.enabled !== undefined) patch.enabled = a.enabled;
+    return ctx.store.updateStrategy(ctx.userId, a.strategyId, patch);
+  },
+};
+
+const deleteTool = {
+  name: "strategy_delete",
+  title: "Delete a strategy",
+  description: "Delete a strategy by id.",
+  inputSchema: {
+    type: "object",
+    properties: { strategyId: { type: "string" } },
+    required: ["strategyId"],
+    additionalProperties: false,
+  },
+  annotations: { ...CONFIG, destructiveHint: true },
+  handler: (ctx, a = {}) => {
+    need(ctx);
+    return { deleted: ctx.store.deleteStrategy(ctx.userId, a.strategyId), strategyId: a.strategyId };
+  },
+};
+
+const setEnabledTool = {
+  name: "strategy_set_enabled",
+  title: "Enable / disable a strategy",
+  description: "Enable or disable a strategy (enabled:true|false). A disabled strategy is skipped when fired.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      strategyId: { type: "string" },
+      enabled: { type: "boolean" },
+    },
+    required: ["strategyId", "enabled"],
+    additionalProperties: false,
+  },
+  annotations: CONFIG,
+  handler: (ctx, a = {}) => {
+    need(ctx);
+    const s = ctx.store.setStrategyEnabled(ctx.userId, a.strategyId, a.enabled);
+    if (!s) throw new Error(`strategy not found: ${a.strategyId}`);
+    return s;
+  },
+};
+
+const fireTool = {
+  name: "strategy_fire",
+  title: "Fire a strategy (re-check condition, prepare txs)",
+  description:
+    "Evaluate one or more strategies against LIVE data and, if the trigger is tripped, PREPARE the transaction(s) — each appears in the Bron app to sign. This is what a Cowork scheduled task calls when a strategy is due; it never acts on stored numbers (it re-reads the live balance/price each run). SAFE TO CALL — preparing does not move funds; signing is on the phone (MPC). Pass strategyId for one, or strategyIds for a batch (each fired independently — one failing does not abort the others, and no prepared tx assumes a prior one settled).",
+  inputSchema: {
+    type: "object",
+    properties: {
+      strategyId: { type: "string", description: "Fire a single strategy" },
+      strategyIds: { type: "array", items: { type: "string" }, description: "Fire several strategies in one call, each independently" },
+    },
+    additionalProperties: false,
+  },
+  annotations: REQUEST_ONLY,
+  handler: async (ctx, a = {}) => {
+    need(ctx);
+    const ids = a.strategyIds && a.strategyIds.length ? a.strategyIds : a.strategyId ? [a.strategyId] : [];
+    if (ids.length === 0) throw new Error("strategy_fire needs strategyId or strategyIds");
+
+    const results = [];
+    for (const id of ids) {
+      const s = ctx.store.getStrategy(ctx.userId, id);
+      if (!s) {
+        results.push({ strategyId: id, error: "not found" });
+        continue;
+      }
+      if (!s.enabled) {
+        results.push({ strategyId: id, type: s.type, skipped: "disabled" });
+        continue;
+      }
+      try {
+        const outcome = await fireStrategy(ctx, s); // re-reads live condition + prepares
+        if (outcome.fired) ctx.store.touchStrategyFired(ctx.userId, id);
+        results.push({ strategyId: id, type: s.type, ...outcome });
+      } catch (e) {
+        // One strategy's failure must not abort the batch.
+        results.push({ strategyId: id, type: s.type, error: e.message });
+      }
+    }
+    return ids.length === 1 ? results[0] : { results };
+  },
+};
+
+export const strategyTools = [createTool, listTool, updateTool, deleteTool, setEnabledTool, fireTool];

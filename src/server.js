@@ -61,7 +61,9 @@ async function resolveCtx(req) {
   } catch {
     return null;
   }
-  return { client: new BronApiClient({ apiKey: jwk }), workspaceId: user.workspaceId };
+  // userId + store let the strategy tools scope per-user config; client +
+  // workspaceId drive the Bron API as before.
+  return { client: new BronApiClient({ apiKey: jwk }), workspaceId: user.workspaceId, userId: user.id, store };
 }
 
 function mcpCors(res) {

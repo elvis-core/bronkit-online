@@ -93,7 +93,7 @@ const STAKE_TYPES = {
   withdraw: "stake-withdrawal",
 };
 
-const stakingTxTool = {
+export const stakingTxTool = {
   name: "bron_tx_staking",
   title: "Prepare a staking request",
   description:

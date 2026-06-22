@@ -114,18 +114,20 @@ function hasSolverPrice(intent) {
 // "signing-required"). Uses the same /transactions endpoint as withdrawals;
 // nothing moves until the user signs (MPC gate). externalId is stable per intent
 // so a retry returns the same transaction instead of duplicating it.
-async function createSignableTx(ctx, { intentId, accountId, externalId }) {
-  return ctx.client.post(`${ws(ctx)}/transactions`, {
+async function createSignableTx(ctx, { intentId, accountId, externalId, description }) {
+  const body = {
     accountId,
     externalId: externalId || `swap-${intentId}`,
     transactionType: "intents",
     params: { intentId },
-  });
+  };
+  if (description) body.description = description; // rationale travels to the signing surface
+  return ctx.client.post(`${ws(ctx)}/transactions`, body);
 }
 
 // Poll the intent; once a solver prices it (and we have an accountId), create the
 // signable transaction. Returns the poll result plus a `signable` summary.
-async function pollAndMaybeSign(ctx, { intentId, accountId, maxWaitSeconds, seed, externalId }) {
+async function pollAndMaybeSign(ctx, { intentId, accountId, maxWaitSeconds, seed, externalId, description }) {
   const startedAt = Date.now();
   let polled;
   try {
@@ -137,7 +139,7 @@ async function pollAndMaybeSign(ctx, { intentId, accountId, maxWaitSeconds, seed
   const signable = { priced: hasSolverPrice(polled.last), created: null, error: null };
   if (signable.priced && accountId) {
     try {
-      signable.created = await createSignableTx(ctx, { intentId, accountId, externalId });
+      signable.created = await createSignableTx(ctx, { intentId, accountId, externalId, description });
     } catch (e) {
       signable.error = e.message;
     }
@@ -290,6 +292,7 @@ export const swapTool = {
       toAmount: { type: "string", description: "Amount of the to-asset (decimal string). Give exactly one of fromAmount / toAmount." },
       intentId: { type: "string", description: "For action:status — the intent id to check. For create it is auto-generated and returned." },
       externalId: { type: "string", description: "Optional idempotency key for the signable transaction; defaults to a stable value derived from the intent id." },
+      description: { type: "string", description: "Optional human rationale written onto the signable transaction so context travels to the Bron app for signing." },
       maxWaitSeconds: { type: "integer", description: `How long to poll within this call before returning (default ${DEFAULT_MAX_WAIT_S}, max ${MAX_MAX_WAIT_S}). Polling stops once a solver prices the intent, at a terminal/expired state, or at the budget.` },
     },
     required: ["action"],
@@ -335,6 +338,7 @@ export const swapTool = {
         maxWaitSeconds: clampWait(a.maxWaitSeconds),
         seed: created,
         externalId: a.externalId,
+        description: a.description,
       });
       return { ...summarise({ action: "create", intentId, ...r }), created };
     }
@@ -348,6 +352,7 @@ export const swapTool = {
         accountId: a.accountId,
         maxWaitSeconds: clampWait(a.maxWaitSeconds),
         externalId: a.externalId,
+        description: a.description,
       });
       return summarise({ action: "status", intentId: a.intentId, ...r });
     }

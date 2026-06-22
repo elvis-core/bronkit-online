@@ -6,6 +6,7 @@ import { compositeTools } from "./composites.js";
 import { writeTools } from "./writes.js";
 import { configTools } from "./config.js";
 import { intentTools } from "./intents.js";
+import { strategyTools } from "./strategies.js";
 
-export const tools = [...readTools, ...compositeTools, ...writeTools, ...configTools, ...intentTools];
+export const tools = [...readTools, ...compositeTools, ...writeTools, ...configTools, ...intentTools, ...strategyTools];
 export const toolsByName = new Map(tools.map((t) => [t.name, t]));

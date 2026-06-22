@@ -30,7 +30,7 @@ export function randomToken(bytes = 32) {
 export class FileStore {
   constructor(path = storePath()) {
     this.path = path;
-    this.state = { clients: {}, users: {}, authCodes: {} };
+    this.state = { clients: {}, users: {}, authCodes: {}, strategies: {} };
     this._load();
   }
 
@@ -38,7 +38,7 @@ export class FileStore {
     try {
       if (existsSync(this.path)) {
         const raw = JSON.parse(readFileSync(this.path, "utf8"));
-        this.state = { clients: {}, users: {}, authCodes: {}, ...raw };
+        this.state = { clients: {}, users: {}, authCodes: {}, strategies: {}, ...raw };
       }
     } catch (e) {
       // Corrupt/unreadable store → start clean rather than crash. No secret logged.
@@ -99,6 +99,64 @@ export class FileStore {
     delete this.state.authCodes[code];
     this._save();
     return data;
+  }
+
+  // --- Strategies (per-user; config, not secret) ---
+  createStrategy(userId, { type, params, trigger }) {
+    const id = newId();
+    const s = {
+      id,
+      userId,
+      type,
+      params: params || {},
+      trigger: trigger || null,
+      enabled: true,
+      lastFiredAt: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.state.strategies[id] = s;
+    this._save();
+    return s;
+  }
+
+  // Ownership-scoped: only returns the strategy if it belongs to userId.
+  getStrategy(userId, id) {
+    const s = this.state.strategies[id];
+    return s && s.userId === userId ? s : null;
+  }
+
+  listStrategies(userId) {
+    return Object.values(this.state.strategies).filter((s) => s.userId === userId);
+  }
+
+  updateStrategy(userId, id, patch = {}) {
+    const s = this.getStrategy(userId, id);
+    if (!s) return null;
+    if (patch.params !== undefined) s.params = patch.params;
+    if (patch.trigger !== undefined) s.trigger = patch.trigger;
+    if (patch.enabled !== undefined) s.enabled = !!patch.enabled;
+    this._save();
+    return s;
+  }
+
+  setStrategyEnabled(userId, id, enabled) {
+    return this.updateStrategy(userId, id, { enabled });
+  }
+
+  touchStrategyFired(userId, id, at = new Date().toISOString()) {
+    const s = this.getStrategy(userId, id);
+    if (!s) return null;
+    s.lastFiredAt = at;
+    this._save();
+    return s;
+  }
+
+  deleteStrategy(userId, id) {
+    const s = this.getStrategy(userId, id);
+    if (!s) return false;
+    delete this.state.strategies[id];
+    this._save();
+    return true;
   }
 
   /** Housekeeping — drop expired auth codes. Safe to call opportunistically. */

@@ -124,13 +124,68 @@ docker run ... -v bronkit-data:/app/data -e STORE_PATH=/app/data/store.json bron
 
 ---
 
+## 7. Scheduled strategies (Cowork wiring)
+
+A **strategy** is stored config the user sets once via chat. When its trigger
+fires, the server PREPARES transaction(s); each lands in the Bron app to sign.
+The stored strategy is standing authorisation to **prepare** — never to sign
+(signing stays on the phone, MPC). The server does **not** run its own cron:
+**a Claude Cowork scheduled task is the clock.**
+
+**Pieces:**
+- The server stores strategies per user (in the same volume-backed store) and
+  exposes `strategy_create / strategy_list / strategy_update / strategy_delete /
+  strategy_set_enabled`, plus **`strategy_fire`** — which re-reads the **live**
+  balance/price, decides, and prepares via the existing tools (`bron_tx_swap`,
+  `bron_tx_staking`). It never acts on stored numbers.
+- A **Cowork scheduled task** calls `strategy_fire` on a schedule. That task is
+  the only clock.
+
+**Set one up:**
+1. In Claude (with the bronkit connector), create the strategy in chat — e.g.
+   *"DCA $10 USDC→ETH from account X every morning"* → `strategy_create` returns a
+   strategy `id`.
+2. Create a Cowork scheduled task (e.g. via the `schedule` skill /
+   `create_scheduled_task`) on the desired cadence, with a prompt like:
+
+   > Using the **bronkit** connector, call `strategy_fire` with
+   > `strategyId: "<the id>"`. Report what it prepared (intent/tx ids, or why it
+   > didn't fire). Do not sign anything.
+
+3. On each run the task calls `strategy_fire` → the server re-checks the live
+   condition and, if tripped, prepares the transaction(s). Each appears in the
+   Bron app to sign, with a rationale (which strategy, the trigger value) in the
+   description. Batches are independent — one prepared tx never assumes a prior
+   one settled.
+
+**Strategy types** (all on existing primitives — no derivatives/lending):
+- `dca` — time schedule → swap a fixed amount A→B. params: `accountId,
+  fromAssetId, toAssetId, amount, schedule`.
+- `idle_to_stake` — when live idle balance exceeds a threshold, stake the excess.
+  params: `accountId, assetId, threshold`.
+- `de_risk` — when a live price drops to/below a level, swap to a stable. params:
+  `accountId, assetId, triggerPrice, toAssetId, and one of amount | percent`.
+
+Cadence/threshold/price live in the strategy; the cron expression you give the
+Cowork task should match the strategy's `schedule`. For price/idle strategies,
+poll cadence is your choice — `strategy_fire` re-reads the condition each run, so
+running more often just checks more often.
+
+---
+
 ## Caveats — not production
 
 This is a POC for UX testing. Before real use, a dev team should harden:
 
 - **Storage:** the encrypted store is a JSON file (or in-memory). Swap `FileStore`
   in `src/store/index.js` for a real database — the interface is small and
-  isolated for exactly this.
+  isolated for exactly this. Strategies live in the same store (config, not
+  secret) and require the mounted volume to survive redeploys.
+- **Strategy firing is live-verified only for swaps.** `strategy_fire` → swap
+  (dca / de_risk) prepares a signable `intents` transaction end-to-end. The
+  `idle_to_stake` path prepares a `stake-delegation` transaction whose live
+  acceptance has been mock-tested but not yet exercised against the real Bron API
+  — verify with one real fire before relying on it.
 - **Token lifecycle:** refresh tokens are stateless JWTs and cannot be revoked
   individually; there is no per-user logout/rotation.
 - **Preferences:** the `bron_preferences` tool writes a single shared
