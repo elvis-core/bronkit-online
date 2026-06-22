@@ -11,7 +11,7 @@ const { swapTool } = await import("../src/tools/intents.js");
 
 // Mock signed client. `getSeq` is consumed one entry per get-intent call; the
 // last entry repeats once exhausted.
-function mockCtx({ createResp, getSeq = [], quoteResp } = {}) {
+function mockCtx({ createResp, getSeq = [], quoteResp, txResp } = {}) {
   const calls = [];
   let i = 0;
   return {
@@ -20,7 +20,9 @@ function mockCtx({ createResp, getSeq = [], quoteResp } = {}) {
     client: {
       async post(path, body) {
         calls.push({ method: "POST", path, body });
-        return path.endsWith("/quote") ? quoteResp : createResp;
+        if (path.endsWith("/quote")) return quoteResp;
+        if (path.endsWith("/transactions")) return txResp || { transactionId: "tx-1", status: "signing-required" };
+        return createResp; // /intents (create)
       },
       async get(path) {
         calls.push({ method: "GET", path });
@@ -60,11 +62,13 @@ test("amount validation: exactly one of fromAmount/toAmount", async () => {
 
 test("create: generates intentId, posts intent, polls to wait-for-user-tx and surfaces the deadline", async () => {
   const deadline = Date.now() + 120000;
+  // No price on any entry → step 3 is NOT triggered; the poll runs through to
+  // wait-for-user-tx and surfaces the deadline / user-action branch.
   const ctx = mockCtx({
     createResp: { intentId: "ignored-server-echo", status: "user-initiated", fromAmount: "100", toAmount: "99" },
     getSeq: [
-      { status: "auction-in-progress", fromAmount: "100", toAmount: "99", price: "0.99" },
-      { status: "wait-for-user-tx", fromAmount: "100", toAmount: "99", price: "0.99", userSettlementDeadline: deadline },
+      { status: "auction-in-progress", fromAmount: "100", toAmount: "99" },
+      { status: "wait-for-user-tx", fromAmount: "100", toAmount: "99", userSettlementDeadline: deadline },
     ],
   });
   const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "a", toAssetId: "b", fromAmount: "100", maxWaitSeconds: 10 });
@@ -84,9 +88,63 @@ test("create: generates intentId, posts intent, polls to wait-for-user-tx and su
   assert.equal(out.userActionRequired, true);
   assert.equal(out.terminal, false);
   assert.equal(out.pollComplete, true);
+  assert.equal(out.signableTransactionId, undefined); // no price → no signable tx created
   assert.equal(out.userSettlementDeadline.epochMs, deadline);
   assert.equal(out.userSettlementDeadline.passed, false);
   assert.match(out.guidance, /Bron app/);
+});
+
+test("create: once a solver prices it, creates the SIGNABLE transaction (step 3)", async () => {
+  const ctx = mockCtx({
+    createResp: { status: "user-initiated" },
+    getSeq: [
+      { status: "auction-in-progress" }, // no price yet
+      { status: "auction-in-progress", price: "0.0003", toAmount: "0.03", userSettlementDeadline: Date.now() + 120000 }, // solver priced it
+    ],
+    txResp: { transactionId: "tx-abc", status: "signing-required" },
+  });
+  const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "a", toAssetId: "b", fromAmount: "100", maxWaitSeconds: 30 });
+
+  assert.equal(out.solverPriced, true);
+  assert.equal(out.signableTransactionId, "tx-abc");
+  assert.equal(out.signableTransaction.status, "signing-required");
+  assert.match(out.guidance, /Bron app|sign/i);
+
+  // The signable tx was created via POST /transactions with the intents type.
+  const txCall = ctx.calls.find((c) => c.method === "POST" && c.path === "/workspaces/ws-test/transactions");
+  assert.ok(txCall, "a POST /transactions call was made");
+  assert.equal(txCall.body.transactionType, "intents");
+  assert.equal(txCall.body.params.intentId, out.intentId);
+  assert.equal(txCall.body.accountId, "acc1");
+  assert.ok(txCall.body.externalId, "externalId present (idempotency)");
+});
+
+test("create: no solver price → no signable transaction, honest guidance", async () => {
+  const ctx = mockCtx({
+    createResp: { status: "user-initiated" },
+    getSeq: [{ status: "auction-in-progress" }], // never priced
+  });
+  const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "a", toAssetId: "b", fromAmount: "1", maxWaitSeconds: 0 });
+  assert.equal(out.solverPriced, false);
+  assert.equal(out.signableTransactionId, undefined);
+  assert.ok(!ctx.calls.some((c) => c.path === "/workspaces/ws-test/transactions"), "no /transactions call");
+  assert.match(out.guidance, /no solver|solvers? .* bidding|priced it yet/i);
+});
+
+test("status: creates the signable tx when priced + accountId given; asks for accountId when missing", async () => {
+  const priced = { status: "auction-in-progress", price: "0.0003", userSettlementDeadline: Date.now() + 120000 };
+  // With accountId → creates the tx.
+  const ctxA = mockCtx({ getSeq: [priced], txResp: { transactionId: "tx-xyz", status: "signing-required" } });
+  const a = await swapTool.handler(ctxA, { action: "status", intentId: "i-1", accountId: "acc1", maxWaitSeconds: 0 });
+  assert.equal(a.signableTransactionId, "tx-xyz");
+  assert.equal(ctxA.calls.find((c) => c.path === "/workspaces/ws-test/transactions").body.params.intentId, "i-1");
+
+  // Without accountId → priced but no tx; guidance asks for accountId.
+  const ctxB = mockCtx({ getSeq: [priced] });
+  const b = await swapTool.handler(ctxB, { action: "status", intentId: "i-1", maxWaitSeconds: 0 });
+  assert.equal(b.solverPriced, true);
+  assert.equal(b.signableTransactionId, undefined);
+  assert.match(b.guidance, /accountId/);
 });
 
 test("create: stops on a terminal state (completed)", async () => {

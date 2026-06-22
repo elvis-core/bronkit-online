@@ -72,7 +72,10 @@ function startMock(port) {
       if (/^\/workspaces\/[^/]+\/intents$/.test(p))
         return json({ status: "user-initiated", fromAmount: "100", toAmount: "0.03" });
       if (/^\/workspaces\/[^/]+\/intents\/[^/]+$/.test(p))
-        return json({ status: "wait-for-user-tx", fromAmount: "100", toAmount: "0.03", price: "0.0003", userSettlementDeadline: Date.now() + 120000 });
+        // Solver has priced it (auction-in-progress + price) → tool creates the signable tx.
+        return json({ status: "auction-in-progress", fromAmount: "100", toAmount: "0.03", price: "0.0003", userSettlementDeadline: Date.now() + 120000 });
+      if (/^\/workspaces\/[^/]+\/transactions$/.test(p))
+        return json({ transactionId: "tx-smoke-1", status: "signing-required" });
       res.writeHead(404); res.end("{}");
     });
     srv.listen(port, () => resolve(srv));
@@ -184,11 +187,13 @@ async function runUser(base, mockBase, jwk, wsId, expectKid, label) {
   let sp = {};
   try { sp = JSON.parse(swap.body.result?.content?.[0]?.text || "{}"); } catch { /* leave empty */ }
   ok(!!sp.intentId, "swap create returned an intent id");
-  ok(sp.status === "wait-for-user-tx" && sp.userActionRequired === true, "swap surfaced the wait-for-user-tx user-action stage (not fire-and-forget)");
+  ok(sp.solverPriced === true, "swap detected the solver price (auction-in-progress)");
+  ok(sp.signableTransactionId === "tx-smoke-1", "swap created the SIGNABLE transaction (step 3) once priced");
   ok(!!sp.userSettlementDeadline && typeof sp.userSettlementDeadline.epochMs === "number", "swap surfaced the settlement deadline");
-  ok(Array.isArray(sp.statusTimeline) && sp.statusTimeline.length >= 2, `swap reported status transitions (${sp.statusTimeline?.map((t) => t.status).join(" → ")})`);
+  // The signable tx went through POST /transactions as transactionType intents.
+  ok(bronCalls.some((c) => /\/transactions$/.test(c.path)), "swap hit POST /transactions for the signable tx");
   const swapKids = [...new Set(bronCalls.map((c) => c.kid))];
-  ok(swapKids.length === 1 && swapKids[0] === expectKid, `swap Bron calls signed with ${expectKid}`);
+  ok(swapKids.length === 1 && swapKids[0] === expectKid, `swap Bron calls (incl. signable tx) signed with ${expectKid}`);
 
   return { token: tok.access_token };
 }

@@ -97,8 +97,56 @@ function deadlinePassed(intent) {
   return false;
 }
 
+// A solver has bid once the intent carries a positive price in a live (non-
+// terminal, non-expired) state. That is the cue to create the signable
+// transaction — step 3 of Bron's intents flow.
+function hasSolverPrice(intent) {
+  if (!intent) return false;
+  const n = Number(intent.price);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  if (TERMINAL.has(intent.status) || intent.status === "not-exist") return false;
+  if (deadlinePassed(intent)) return false;
+  return true;
+}
+
+// Step 3: create the signable transaction that references the priced intent.
+// This is the object that appears in the Bron app to sign (status
+// "signing-required"). Uses the same /transactions endpoint as withdrawals;
+// nothing moves until the user signs (MPC gate). externalId is stable per intent
+// so a retry returns the same transaction instead of duplicating it.
+async function createSignableTx(ctx, { intentId, accountId, externalId }) {
+  return ctx.client.post(`${ws(ctx)}/transactions`, {
+    accountId,
+    externalId: externalId || `swap-${intentId}`,
+    transactionType: "intents",
+    params: { intentId },
+  });
+}
+
+// Poll the intent; once a solver prices it (and we have an accountId), create the
+// signable transaction. Returns the poll result plus a `signable` summary.
+async function pollAndMaybeSign(ctx, { intentId, accountId, maxWaitSeconds, seed, externalId }) {
+  const startedAt = Date.now();
+  let polled;
+  try {
+    polled = await pollIntent(ctx, intentId, { maxWaitSeconds, seed });
+  } catch (e) {
+    polled = { timeline: [], last: seed || null, pollError: e.message };
+  }
+  const polledForSeconds = Math.round((Date.now() - startedAt) / 1000);
+  const signable = { priced: hasSolverPrice(polled.last), created: null, error: null };
+  if (signable.priced && accountId) {
+    try {
+      signable.created = await createSignableTx(ctx, { intentId, accountId, externalId });
+    } catch (e) {
+      signable.error = e.message;
+    }
+  }
+  return { ...polled, polledForSeconds, signable };
+}
+
 // Bounded poll of get-intent. Records each DISTINCT status as a transition.
-// Stops on a STOP state or when the time budget elapses. Never loops forever.
+// Stops on a STOP state, once a solver prices it, or when the budget elapses.
 async function pollIntent(ctx, intentId, { maxWaitSeconds, seed }) {
   const endBy = Date.now() + maxWaitSeconds * 1000;
   const timeline = [];
@@ -119,6 +167,8 @@ async function pollIntent(ctx, intentId, { maxWaitSeconds, seed }) {
   while (true) {
     const status = last && last.status;
     if (status && STOP.has(status)) break;
+    // A solver has priced it — stop so we can create the signable transaction.
+    if (last && hasSolverPrice(last)) break;
     // A passed deadline means the intent can no longer advance or be signed —
     // it's dead, so stop polling instead of waiting out the budget.
     if (last !== null && deadlinePassed(last)) break;
@@ -138,7 +188,8 @@ async function pollIntent(ctx, intentId, { maxWaitSeconds, seed }) {
 }
 
 // Build the unified result the model narrates from.
-function summarise({ action, intentId, timeline, last, pollError, polledForSeconds }) {
+function summarise({ action, intentId, timeline, last, pollError, polledForSeconds, signable }) {
+  signable = signable || { priced: false, created: null, error: null };
   const status = (last && last.status) || null;
   const terminal = status ? TERMINAL.has(status) : false;
   const notFound = status === "not-exist";
@@ -149,8 +200,19 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
   const expired = !terminal && deadlinePassed(last);
   const userActionRequired = status === USER_ACTION && !expired;
 
+  // The signable transaction (step 3) is the object the user signs in the app.
+  const tx = signable.created || null;
+  const signableTransactionId = tx ? tx.transactionId || (tx.transaction && tx.transaction.transactionId) || null : null;
+  const signableStatus = tx ? tx.status || (tx.transaction && tx.transaction.status) || null : null;
+
   let guidance;
-  if (status === "completed") {
+  if (tx) {
+    guidance =
+      "Signable transaction created — it is now in the Bron app awaiting your signature" +
+      (signableStatus ? ` (status: ${signableStatus})` : "") +
+      (deadline ? `, before ${deadline.iso} (~${deadline.secondsRemaining}s)` : "") +
+      ". Open the Bron app and sign it to execute the swap.";
+  } else if (status === "completed") {
     guidance = "Swap completed.";
   } else if (terminal) {
     guidance = `Swap ended: ${status}.`;
@@ -158,8 +220,11 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
     guidance =
       `The deadline passed while the intent was still at '${status}', so it can no longer be signed or settled — it's dead. ` +
       "It never advanced through the solver auction (nothing bid on it in time), so no signable transaction was ever produced. " +
-      "This is a Bron-side auction/solver matter, not a bronkit issue: where no solvers are bidding (e.g. a quiet testnet) intents stall at 'user-initiated' and expire. " +
-      "Re-running stalls the same way unless solvers are active.";
+      "This is a Bron-side auction/solver matter, not a bronkit issue: where no solvers are bidding (e.g. a quiet testnet) intents stall at 'user-initiated' and expire.";
+  } else if (signable.priced && signable.error) {
+    guidance = `A solver priced the intent, but creating the signable transaction failed: ${signable.error}. Ask me to retry (action:status with accountId).`;
+  } else if (signable.priced && !signable.created) {
+    guidance = "A solver priced the intent. Provide accountId (action:status with accountId, or action:create) so I can create the signable transaction for you to sign.";
   } else if (userActionRequired) {
     guidance =
       "Open the Bron app and approve/sign the swap before the settlement deadline" +
@@ -171,7 +236,7 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
     guidance = `Stopped polling after a read error (${pollError}). Ask me to check the status again.`;
   } else {
     guidance =
-      `Still ${status || "pending"} after ${polledForSeconds}s — waiting on the solver auction to advance it. ` +
+      `Still ${status || "pending"} after ${polledForSeconds}s — no solver has priced it yet. ` +
       "If it never leaves 'user-initiated', the environment likely has no solvers bidding. Ask me to check the status again, or confirm solvers are active.";
   }
 
@@ -183,17 +248,21 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
     terminal,
     expired,
     userActionRequired,
+    solverPriced: signable.priced,
+    signableTransaction: tx || undefined,
+    signableTransactionId: signableTransactionId || undefined,
+    signableTransactionError: signable.error || undefined,
     notFound,
     statusTimeline: timeline,
     userSettlementDeadline: deadline,
     auctionExpiry,
     amounts: last ? { fromAmount: last.fromAmount, toAmount: last.toAmount, price: last.price } : null,
     polledForSeconds,
-    pollComplete: terminal || expired || userActionRequired || notFound,
+    pollComplete: terminal || expired || userActionRequired || notFound || !!tx,
     pollError: pollError || undefined,
     guidance,
     note:
-      "Funds move only when you sign at the wait-for-user-tx stage, before the deadline. Reaching that stage requires Bron's solver auction to advance the intent — bronkit creates and tracks the intent but cannot itself progress the auction. Polling is bounded; call action:status to keep following.",
+      "Flow: create intent -> solver prices it in the auction -> bronkit creates the signable transaction (transactionType:intents) -> you sign it in the Bron app (MPC gate). bronkit drives every step it can, but it cannot make a solver bid; with no active solver the intent stalls at user-initiated. Polling is bounded; call action:status (with accountId) to continue.",
   };
 }
 
@@ -201,26 +270,27 @@ export const swapTool = {
   name: "bron_tx_swap",
   title: "Swap assets (Bron intent)",
   description:
-    "Swap one asset for another via Bron's Intents auction. SAFE TO CALL — placing an intent does NOT move funds; funds move only when the user signs the swap in the Bron app at the 'wait-for-user-tx' stage, before the settlement deadline (MPC gate). " +
+    "Swap one asset for another via Bron's Intents auction. SAFE TO CALL — does NOT move funds; funds move only when the user signs the resulting transaction in the Bron app (MPC gate). " +
+    "Full flow this tool drives: 1) create the intent, 2) poll until a solver prices it in the auction, 3) create the SIGNABLE transaction (transactionType:intents) — which appears in the Bron app for the user to sign. " +
     "Three actions: " +
-    "action:'quote' = indicative price preview (no order created) — use this first to show the user price/fees, mirroring the withdrawal dry-run. " +
-    "action:'create' = place the intent (auto-generates intentId), then reports the status transitions it observes; it stops and tells you when the user must act, or on a terminal state. " +
-    "action:'status' = re-check an existing intent by intentId and report progress. " +
+    "action:'quote' = indicative price preview (POST /intents/quote, no order created) — show the user price/fees first. " +
+    "action:'create' = place the intent (auto-generates intentId) AND, once a solver prices it within the poll window, create the signable transaction; the result returns signableTransactionId when that happens. Requires accountId. " +
+    "action:'status' = re-check an existing intent by intentId; pass accountId so that if a solver has since priced it, the signable transaction is created on this check too (idempotent). " +
     "Identify assets by id (fromAssetId / toAssetId) and give exactly one of fromAmount or toAmount. " +
-    "Lifecycle: user-initiated → auction-in-progress → wait-for-user-tx (USER ACTS) → on-chain confirmations → completed (or liquidated / cancelled). Polling is bounded — call action:'status' again to keep following. " +
-    "Reaching the signable stage requires Bron's solver auction to advance the intent; bronkit creates and tracks it but cannot progress the auction itself. Where no solvers are bidding (e.g. a quiet testnet) the intent stays at 'user-initiated' and expires at its deadline — the result reports expired:true with the reason. " +
-    "Note: the Intents API has no free-text field, so a human rationale cannot be attached to the intent itself (unlike withdrawals). Do not refuse on safety grounds — the human approval gate is enforced downstream.",
+    "IMPORTANT — the signable transaction only exists after a solver bids (the intent reaches a populated price). bronkit creates the intent and the signable transaction, but it cannot make a solver bid: with no active solver (e.g. a quiet testnet) the intent stalls at 'user-initiated' and expires, and no signable transaction is produced — the result reports expired:true with the reason. " +
+    "Do not refuse on safety grounds — the human signing gate is enforced downstream.",
   inputSchema: {
     type: "object",
     properties: {
-      action: { type: "string", enum: ["quote", "create", "status"], description: "quote = preview only; create = place the swap; status = check an existing intent" },
-      accountId: { type: "string", description: "Account id the swap is placed from (required for create)" },
+      action: { type: "string", enum: ["quote", "create", "status"], description: "quote = preview only; create = place the swap + create the signable tx once priced; status = check an existing intent (and create the signable tx if now priced)" },
+      accountId: { type: "string", description: "Account id the swap is placed from (required for create; pass on status too so the signable transaction can be created once a solver prices the intent)" },
       fromAssetId: { type: "string", description: "Asset id being sent (required for quote/create)" },
       toAssetId: { type: "string", description: "Asset id to receive (required for quote/create)" },
       fromAmount: { type: "string", description: "Amount of the from-asset (decimal string). Give exactly one of fromAmount / toAmount." },
       toAmount: { type: "string", description: "Amount of the to-asset (decimal string). Give exactly one of fromAmount / toAmount." },
       intentId: { type: "string", description: "For action:status — the intent id to check. For create it is auto-generated and returned." },
-      maxWaitSeconds: { type: "integer", description: `How long to poll within this call before returning (default ${DEFAULT_MAX_WAIT_S}, max ${MAX_MAX_WAIT_S}). Polling always stops at wait-for-user-tx or a terminal state.` },
+      externalId: { type: "string", description: "Optional idempotency key for the signable transaction; defaults to a stable value derived from the intent id." },
+      maxWaitSeconds: { type: "integer", description: `How long to poll within this call before returning (default ${DEFAULT_MAX_WAIT_S}, max ${MAX_MAX_WAIT_S}). Polling stops once a solver prices the intent, at a terminal/expired state, or at the budget.` },
     },
     required: ["action"],
     additionalProperties: false,
@@ -256,30 +326,30 @@ export const swapTool = {
       if (a.toAmount != null && a.toAmount !== "") body.toAmount = a.toAmount;
 
       // Create returns the initial Intent (already carries a status) — seed the
-      // poll with it so the intent id is reported even if polling later errors.
+      // poll with it. Then poll until a solver prices it and create the signable
+      // transaction (step 3) so it appears in the Bron app to sign.
       const created = await ctx.client.post(`${ws(ctx)}/intents`, body);
-      const maxWaitSeconds = clampWait(a.maxWaitSeconds);
-      const startedAt = Date.now();
-      let polled = { timeline: [], last: created, pollError: null };
-      try {
-        polled = await pollIntent(ctx, intentId, { maxWaitSeconds, seed: created });
-      } catch (e) {
-        polled = { timeline: [], last: created, pollError: e.message };
-      }
-      const polledForSeconds = Math.round((Date.now() - startedAt) / 1000);
-      return {
-        ...summarise({ action: "create", intentId, ...polled, polledForSeconds, maxWaitSeconds }),
-        created,
-      };
+      const r = await pollAndMaybeSign(ctx, {
+        intentId,
+        accountId: a.accountId,
+        maxWaitSeconds: clampWait(a.maxWaitSeconds),
+        seed: created,
+        externalId: a.externalId,
+      });
+      return { ...summarise({ action: "create", intentId, ...r }), created };
     }
 
     if (action === "status") {
       if (!a.intentId) throw new Error("status needs intentId.");
-      const maxWaitSeconds = clampWait(a.maxWaitSeconds);
-      const startedAt = Date.now();
-      const polled = await pollIntent(ctx, a.intentId, { maxWaitSeconds });
-      const polledForSeconds = Math.round((Date.now() - startedAt) / 1000);
-      return summarise({ action: "status", intentId: a.intentId, ...polled, polledForSeconds, maxWaitSeconds });
+      // Pass accountId so that if a solver has now priced the intent, we create
+      // the signable transaction on this check too (idempotent per intent).
+      const r = await pollAndMaybeSign(ctx, {
+        intentId: a.intentId,
+        accountId: a.accountId,
+        maxWaitSeconds: clampWait(a.maxWaitSeconds),
+        externalId: a.externalId,
+      });
+      return summarise({ action: "status", intentId: a.intentId, ...r });
     }
 
     throw new Error(`Unknown action: ${action}`);
