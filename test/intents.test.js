@@ -121,6 +121,31 @@ test("bounded: never loops forever — non-terminal stream returns at the time b
   assert.match(out.guidance, /check the status again/i);
 });
 
+test("expired: deadline passed while stuck at user-initiated → reported dead, not 'in progress'", async () => {
+  const past = Date.now() - 60000;
+  const ctx = mockCtx({
+    createResp: { status: "user-initiated", userSettlementDeadline: past },
+    getSeq: [{ status: "user-initiated", userSettlementDeadline: past }],
+  });
+  const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "a", toAssetId: "b", fromAmount: "1", maxWaitSeconds: 30 });
+  assert.equal(out.status, "user-initiated");   // Bron's status relayed truthfully
+  assert.equal(out.expired, true);              // but we derive that it's dead
+  assert.equal(out.userActionRequired, false);
+  assert.equal(out.terminal, false);
+  assert.equal(out.pollComplete, true);         // stop telling the user to poll a dead intent
+  assert.match(out.guidance, /dead|deadline passed/i);
+  // It must not have burned the whole budget polling a dead intent.
+  assert.ok(out.polledForSeconds < 5);
+});
+
+test("expired takes precedence: wait-for-user-tx but deadline already passed → not actionable", async () => {
+  const past = Date.now() - 1000;
+  const ctx = mockCtx({ getSeq: [{ status: "wait-for-user-tx", userSettlementDeadline: past }] });
+  const out = await swapTool.handler(ctx, { action: "status", intentId: "i", maxWaitSeconds: 0 });
+  assert.equal(out.expired, true);
+  assert.equal(out.userActionRequired, false); // can't sign after the deadline
+});
+
 test("create with maxWaitSeconds 0 returns the intent id immediately without polling", async () => {
   const ctx = mockCtx({ createResp: { status: "user-initiated" }, getSeq: [{ status: "auction-in-progress" }] });
   const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "a", toAssetId: "b", fromAmount: "1", maxWaitSeconds: 0 });

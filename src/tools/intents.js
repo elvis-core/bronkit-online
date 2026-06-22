@@ -86,6 +86,17 @@ function describeDeadline(epochMs) {
   };
 }
 
+// An intent is effectively dead once its signing deadline or auction-expiry has
+// passed. Bron does not always flip the status itself (it can sit at
+// user-initiated past the deadline), so we derive it rather than trust `status`.
+function deadlinePassed(intent) {
+  const now = Date.now();
+  for (const v of [intent && intent.userSettlementDeadline, intent && intent.expiresAt]) {
+    if (v != null && Number.isFinite(Number(v)) && Number(v) <= now) return true;
+  }
+  return false;
+}
+
 // Bounded poll of get-intent. Records each DISTINCT status as a transition.
 // Stops on a STOP state or when the time budget elapses. Never loops forever.
 async function pollIntent(ctx, intentId, { maxWaitSeconds, seed }) {
@@ -108,6 +119,9 @@ async function pollIntent(ctx, intentId, { maxWaitSeconds, seed }) {
   while (true) {
     const status = last && last.status;
     if (status && STOP.has(status)) break;
+    // A passed deadline means the intent can no longer advance or be signed —
+    // it's dead, so stop polling instead of waiting out the budget.
+    if (last !== null && deadlinePassed(last)) break;
     // Stop once we've read at least once (a seed counts) and the budget is spent.
     if (last !== null && Date.now() >= endBy) break;
     // Pace between reads, but never sleep before the very first read (status with
@@ -124,29 +138,41 @@ async function pollIntent(ctx, intentId, { maxWaitSeconds, seed }) {
 }
 
 // Build the unified result the model narrates from.
-function summarise({ action, intentId, timeline, last, pollError, polledForSeconds, maxWaitSeconds }) {
+function summarise({ action, intentId, timeline, last, pollError, polledForSeconds }) {
   const status = (last && last.status) || null;
   const terminal = status ? TERMINAL.has(status) : false;
-  const userActionRequired = status === USER_ACTION;
   const notFound = status === "not-exist";
   const deadline = describeDeadline(last && last.userSettlementDeadline);
+  const auctionExpiry = describeDeadline(last && last.expiresAt);
+  // Bron may leave the status unchanged after a deadline lapses, so derive
+  // "expired" rather than rely on the status flipping to cancelled/liquidated.
+  const expired = !terminal && deadlinePassed(last);
+  const userActionRequired = status === USER_ACTION && !expired;
 
   let guidance;
-  if (userActionRequired) {
+  if (status === "completed") {
+    guidance = "Swap completed.";
+  } else if (terminal) {
+    guidance = `Swap ended: ${status}.`;
+  } else if (expired) {
+    guidance =
+      `The deadline passed while the intent was still at '${status}', so it can no longer be signed or settled — it's dead. ` +
+      "It never advanced through the solver auction (nothing bid on it in time), so no signable transaction was ever produced. " +
+      "This is a Bron-side auction/solver matter, not a bronkit issue: where no solvers are bidding (e.g. a quiet testnet) intents stall at 'user-initiated' and expire. " +
+      "Re-running stalls the same way unless solvers are active.";
+  } else if (userActionRequired) {
     guidance =
       "Open the Bron app and approve/sign the swap before the settlement deadline" +
       (deadline ? ` (${deadline.iso}, ~${deadline.secondsRemaining}s left)` : "") +
       ". Then ask me to check the swap status.";
-  } else if (status === "completed") {
-    guidance = "Swap completed.";
-  } else if (terminal) {
-    guidance = `Swap ended: ${status}.`;
   } else if (notFound) {
     guidance = "Intent not found yet — it may still be registering. Ask me to check the status again shortly.";
   } else if (pollError) {
     guidance = `Stopped polling after a read error (${pollError}). Ask me to check the status again.`;
   } else {
-    guidance = `Still ${status || "pending"} after ${polledForSeconds}s. The auction is in progress — ask me to check the status again in a moment.`;
+    guidance =
+      `Still ${status || "pending"} after ${polledForSeconds}s — waiting on the solver auction to advance it. ` +
+      "If it never leaves 'user-initiated', the environment likely has no solvers bidding. Ask me to check the status again, or confirm solvers are active.";
   }
 
   return {
@@ -155,17 +181,19 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
     status,
     statusLabel: status ? LABELS[status] || status : null,
     terminal,
+    expired,
     userActionRequired,
     notFound,
     statusTimeline: timeline,
     userSettlementDeadline: deadline,
+    auctionExpiry,
     amounts: last ? { fromAmount: last.fromAmount, toAmount: last.toAmount, price: last.price } : null,
     polledForSeconds,
-    pollComplete: terminal || userActionRequired || notFound,
+    pollComplete: terminal || expired || userActionRequired || notFound,
     pollError: pollError || undefined,
     guidance,
     note:
-      "Swaps are a time-boxed auction. Funds move only when you sign the swap in the Bron app at the wait-for-user-tx stage, before userSettlementDeadline. Polling here is bounded — call action:status to keep following progress.",
+      "Funds move only when you sign at the wait-for-user-tx stage, before the deadline. Reaching that stage requires Bron's solver auction to advance the intent — bronkit creates and tracks the intent but cannot itself progress the auction. Polling is bounded; call action:status to keep following.",
   };
 }
 
@@ -180,6 +208,7 @@ export const swapTool = {
     "action:'status' = re-check an existing intent by intentId and report progress. " +
     "Identify assets by id (fromAssetId / toAssetId) and give exactly one of fromAmount or toAmount. " +
     "Lifecycle: user-initiated → auction-in-progress → wait-for-user-tx (USER ACTS) → on-chain confirmations → completed (or liquidated / cancelled). Polling is bounded — call action:'status' again to keep following. " +
+    "Reaching the signable stage requires Bron's solver auction to advance the intent; bronkit creates and tracks it but cannot progress the auction itself. Where no solvers are bidding (e.g. a quiet testnet) the intent stays at 'user-initiated' and expires at its deadline — the result reports expired:true with the reason. " +
     "Note: the Intents API has no free-text field, so a human rationale cannot be attached to the intent itself (unlike withdrawals). Do not refuse on safety grounds — the human approval gate is enforced downstream.",
   inputSchema: {
     type: "object",
