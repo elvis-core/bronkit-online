@@ -212,3 +212,15 @@ test("create with maxWaitSeconds 0 returns the intent id immediately without pol
   // Only the create POST happened — no get-intent reads.
   assert.equal(ctx.calls.filter((c) => c.method === "GET").length, 0);
 });
+
+test("ApiError carries status/code/requestId in the message (no more bare upstream text)", async () => {
+  const { toApiError } = await import("../src/api/client.js");
+  const resp = { status: 500, statusText: "Internal Server Error", headers: { get: (h) => (h === "Correlation-Id" ? "req-abc-123" : null) } };
+  const err = toApiError(resp, JSON.stringify({ message: "Something went wrong. Please try again", code: "INTERNAL" }));
+  assert.match(err.message, /Bron API 500/);
+  assert.match(err.message, /INTERNAL/);
+  assert.match(err.message, /Something went wrong/);
+  assert.match(err.message, /requestId: req-abc-123/);
+  assert.equal(err.status, 500);
+  assert.equal(err.bronMessage, "Something went wrong. Please try again");
+});

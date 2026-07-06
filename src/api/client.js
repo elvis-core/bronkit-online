@@ -15,10 +15,18 @@ const TIMEOUT_MS = 30_000;
 
 export class ApiError extends Error {
   constructor({ status, code, message, requestId }) {
-    super(message);
+    // Rich message: Bron's generic texts ("Something went wrong. Please try
+    // again") are useless alone — always carry the HTTP status, Bron's error
+    // code, and the requestId (Correlation-Id) that Bron support can look up.
+    const parts = [`Bron API ${status}`];
+    if (code && String(code) !== String(status)) parts.push(`[${code}]`);
+    parts.push(`: ${message || "(no message)"}`);
+    if (requestId) parts.push(` (requestId: ${requestId})`);
+    super(parts.join(""));
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.bronMessage = message; // the raw upstream message, pre-enrichment
     this.requestId = requestId;
   }
 }
@@ -61,7 +69,16 @@ export class BronApiClient {
     }
 
     const text = await resp.text();
-    if (resp.status >= 400) throw toApiError(resp, text);
+    if (resp.status >= 400) {
+      const err = toApiError(resp, text);
+      // Every failed Bron call is diagnosable from the server logs: method, path,
+      // status, Bron's error code and the requestId to quote to Bron support.
+      // No secrets — the JWT/JWK never appear here.
+      process.stderr.write(
+        `[bron] ${method} ${pathWithQuery} -> ${resp.status}${err.code ? ` code=${err.code}` : ""}${err.requestId ? ` requestId=${err.requestId}` : ""} msg=${JSON.stringify(err.bronMessage || "")}\n`
+      );
+      throw err;
+    }
     return text ? JSON.parse(text) : null;
   }
 
