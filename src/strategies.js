@@ -94,6 +94,27 @@ export function validateStrategy(type, params = {}) {
   }
 }
 
+// Self-explanatory default name when the user/Claude doesn't supply one.
+// Plain words, the key numbers, ASCII only — shown in lists and tx rationales.
+export function defaultStrategyName(type, p = {}) {
+  switch (type) {
+    case "dca":
+      return `Swap ${p.amount} ${p.fromAssetId} -> ${p.toAssetId} (schedule: ${p.schedule})`;
+    case "idle_to_stake":
+      return `Stake ${p.assetId} idle balance above ${p.threshold}`;
+    case "de_risk":
+      return p.percent != null && p.percent !== ""
+        ? `Sell ${p.percent}% of ${p.assetId} -> ${p.toAssetId} if price <= ${p.triggerPrice}`
+        : `Sell ${p.amount} ${p.assetId} -> ${p.toAssetId} if price <= ${p.triggerPrice}`;
+    case "price_target": {
+      const cmp = p.direction === "above" ? ">=" : "<=";
+      return `Swap ${p.amount} ${p.fromAssetId} -> ${p.toAssetId} when ${p.assetId} ${cmp} ${p.targetPrice}`;
+    }
+    default:
+      return type;
+  }
+}
+
 // ---- live condition reads (never use stored numbers) ----------------------
 
 async function readBalanceField(ctx, accountId, assetId, field) {
@@ -118,7 +139,8 @@ async function readPrice(ctx, assetId) {
 // ---- preparing (via the existing tools, each independent) ------------------
 
 function rationale(s, detail) {
-  return `[bronkit strategy ${s.id} · ${s.type}] ${detail} — fired ${nowIso()}`;
+  const label = s.name ? `"${s.name}"` : s.type;
+  return `[bronkit strategy ${label} · ${s.id}] ${detail} — fired ${nowIso()}`;
 }
 
 async function prepareSwap(ctx, { accountId, fromAssetId, toAssetId, fromAmount, description }) {

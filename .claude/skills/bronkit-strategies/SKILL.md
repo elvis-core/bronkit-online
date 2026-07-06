@@ -41,9 +41,16 @@ strategy is stored and enabled; the existing metronome will evaluate it next tic
 ## Creating a strategy (in chat)
 1. **Gather params** for the type (you always need `accountId` + the asset ids — ask or
    infer from a prior balances/accounts call). Confirm the plan in one line.
-2. `strategy_create({ type, params })`. Keep the returned `id`.
-3. If the user hasn't set up the metronome yet, offer the "activate" flow above so the
-   strategy actually gets evaluated. (A stored strategy with no metronome never fires.)
+2. `strategy_create({ type, name, params })`. Give it a **self-explanatory name** in the
+   user's own words ("Buy ETH with 10 USDC every morning") — auto-generated if omitted.
+   Keep the returned `id`.
+3. **Never stop at "strategy is set up."** A stored strategy does NOT run by itself —
+   always explain the beat (the create result's `howItRuns` says it): it fires only when
+   the hourly Cowork metronome calls `strategy_run`. No metronome yet → run the
+   "activate" flow above NOW. Metronome exists → say the strategy is picked up
+   automatically on its next hourly run.
+
+When listing strategies, lead with each one's **name**, not the type code.
 
 ## Strategy types (the only ones — all on existing primitives)
 - **dca** — time schedule → swap a fixed amount A→B. params: `accountId, fromAssetId, toAssetId, amount, schedule`.

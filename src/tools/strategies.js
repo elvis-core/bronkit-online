@@ -4,7 +4,7 @@
 // condition and prepares the transaction(s). Strategies are scoped to the
 // caller's user identity (ctx.userId), persisted in ctx.store.
 
-import { STRATEGY_TYPES, validateStrategy, fireStrategy } from "../strategies.js";
+import { STRATEGY_TYPES, validateStrategy, fireStrategy, defaultStrategyName } from "../strategies.js";
 
 const CONFIG = { readOnlyHint: false, destructiveHint: false, openWorldHint: false }; // local store, reversible
 const READ = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
@@ -27,11 +27,13 @@ const createTool = {
   title: "Create a strategy",
   description:
     "Create a standing strategy that PREPARES transactions automatically when its trigger fires (the hourly Cowork \"metronome\" task is the clock — see scheduler_setup_text). Standing authorisation to prepare only — signing always happens on the phone. Types: dca (time-scheduled swap), idle_to_stake (stake idle balance over a threshold), de_risk (swap to a stable when a price crosses down to/below a level), price_target (swap when a price crosses a target, direction above|below). " +
-    PARAMS_HELP,
+    PARAMS_HELP +
+    " IMPORTANT: after creating, ALWAYS tell the user how firing works — a stored strategy does NOT run by itself; the hourly Cowork metronome task is what evaluates it (the create result's howItRuns field explains; relay it).",
   inputSchema: {
     type: "object",
     properties: {
-      type: { type: "string", enum: STRATEGY_TYPES, description: "dca | idle_to_stake | de_risk" },
+      type: { type: "string", enum: STRATEGY_TYPES, description: "dca | idle_to_stake | de_risk | price_target" },
+      name: { type: "string", description: "Self-explanatory human name shown in lists and in the signed-transaction rationale, e.g. 'Buy ETH with 10 USDC every morning'. Auto-generated from the params if omitted." },
       params: { type: "object", description: PARAMS_HELP, additionalProperties: true },
       enabled: { type: "boolean", description: "Start enabled (default true)" },
     },
@@ -42,16 +44,22 @@ const createTool = {
   handler: (ctx, a = {}) => {
     need(ctx);
     const { trigger } = validateStrategy(a.type, a.params || {}); // throws on invalid params
-    const s = ctx.store.createStrategy(ctx.userId, { type: a.type, params: a.params, trigger });
+    const name = (typeof a.name === "string" && a.name.trim().slice(0, 120)) || defaultStrategyName(a.type, a.params || {});
+    const s = ctx.store.createStrategy(ctx.userId, { type: a.type, name, params: a.params, trigger });
     if (a.enabled === false) ctx.store.setStrategyEnabled(ctx.userId, s.id, false);
-    return ctx.store.getStrategy(ctx.userId, s.id);
+    return {
+      ...ctx.store.getStrategy(ctx.userId, s.id),
+      // Not persisted — the beat explanation the assistant must relay to the user.
+      howItRuns:
+        "Stored, but NOT self-running: nothing on this server wakes up on its own. The strategy is evaluated only when the hourly Cowork metronome task calls strategy_run. If the user has NOT yet created the metronome, tell them now and set it up: call scheduler_setup_text and hand them its pasteText with the steps (open Cowork -> type /schedule -> paste -> confirm) — one-time setup that then drives ALL strategies. If the metronome already exists, say this strategy will be picked up automatically on its next hourly run.",
+    };
   },
 };
 
 const listTool = {
   name: "strategy_list",
   title: "List strategies",
-  description: "List the user's strategies (id, type, params, trigger, enabled, lastFiredAt). Read-only.",
+  description: "List the user's strategies (id, name, type, params, trigger, enabled, lastFiredAt). Read-only. When showing the user, lead with each strategy's NAME (self-explanatory), not its type code.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   annotations: READ,
   handler: (ctx) => {
@@ -63,11 +71,12 @@ const listTool = {
 const updateTool = {
   name: "strategy_update",
   title: "Update a strategy",
-  description: "Update a strategy's params, enabled flag, and/or scheduledTaskId. Provided params are merged with the existing ones and re-validated against the type. The skill records the Cowork task id here via scheduledTaskId so pause/delete can update both halves. " + PARAMS_HELP,
+  description: "Update a strategy's name, params, enabled flag, and/or scheduledTaskId. Provided params are merged with the existing ones and re-validated against the type. The skill records the Cowork task id here via scheduledTaskId so pause/delete can update both halves. " + PARAMS_HELP,
   inputSchema: {
     type: "object",
     properties: {
       strategyId: { type: "string" },
+      name: { type: "string", description: "New self-explanatory human name" },
       params: { type: "object", description: PARAMS_HELP, additionalProperties: true },
       enabled: { type: "boolean" },
       scheduledTaskId: { type: "string", description: "Id of the Cowork scheduled task that fires this strategy (set by the orchestration skill after create_scheduled_task)." },
@@ -81,6 +90,7 @@ const updateTool = {
     const existing = ctx.store.getStrategy(ctx.userId, a.strategyId);
     if (!existing) throw new Error(`strategy not found: ${a.strategyId}`);
     const patch = {};
+    if (a.name !== undefined) patch.name = String(a.name).trim().slice(0, 120) || existing.name;
     if (a.params !== undefined) {
       const merged = { ...existing.params, ...a.params };
       const { trigger } = validateStrategy(existing.type, merged); // re-validate full set

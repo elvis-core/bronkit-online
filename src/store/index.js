@@ -102,12 +102,13 @@ export class FileStore {
   }
 
   // --- Strategies (per-user; config, not secret) ---
-  createStrategy(userId, { type, params, trigger }) {
+  createStrategy(userId, { type, name, params, trigger }) {
     const id = newId();
     const s = {
       id,
       userId,
       type,
+      name: name || null, // self-explanatory human name (tool layer auto-generates if absent)
       params: params || {},
       trigger: trigger || null,
       enabled: true,
@@ -135,6 +136,7 @@ export class FileStore {
   updateStrategy(userId, id, patch = {}) {
     const s = this.getStrategy(userId, id);
     if (!s) return null;
+    if (patch.name !== undefined) s.name = patch.name;
     if (patch.params !== undefined) s.params = patch.params;
     if (patch.trigger !== undefined) s.trigger = patch.trigger;
     if (patch.enabled !== undefined) s.enabled = !!patch.enabled;

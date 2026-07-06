@@ -227,6 +227,41 @@ test("batched fire: each strategy independent; one bad id does not abort the res
   assert.equal(out.results[1].error, "not found");
 });
 
+test("strategy names: auto-generated self-explanatory default; explicit name kept; renamable", () => {
+  const ctx = freshCtx();
+  // No name given -> auto-generated from params, human-readable.
+  const auto = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
+  assert.match(auto.name, /USDC/);
+  assert.match(auto.name, /ETH/);
+  assert.match(auto.name, /10/);
+  // Explicit name wins.
+  const named = T.strategy_create.handler(ctx, { type: "price_target", name: "Sell half my ETH at 3500", params: { accountId: "acc1", assetId: "ETH", direction: "above", targetPrice: "3500", fromAssetId: "ETH", toAssetId: "USDC", amount: "0.5" } });
+  assert.equal(named.name, "Sell half my ETH at 3500");
+  // Rename via update; visible in list.
+  T.strategy_update.handler(ctx, { strategyId: named.id, name: "Take profit on ETH" });
+  const listed = T.strategy_list.handler(ctx).strategies.find((s) => s.id === named.id);
+  assert.equal(listed.name, "Take profit on ETH");
+});
+
+test("strategy name travels into the fired tx rationale (signing surface)", async () => {
+  const ctx = freshCtx({ intentGet: PRICED_INTENT });
+  const s = T.strategy_create.handler(ctx, { type: "dca", name: "Morning ETH buy", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
+  await T.strategy_run.handler(ctx, { strategyId: s.id });
+  const txCall = ctx.client.calls.find((c) => c.method === "POST" && c.path.endsWith("/transactions"));
+  assert.match(txCall.body.description, /Morning ETH buy/);
+});
+
+test("strategy_create result explains the metronome beat (howItRuns)", () => {
+  const ctx = freshCtx();
+  const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
+  assert.ok(typeof s.howItRuns === "string");
+  assert.match(s.howItRuns, /NOT self-running/);
+  assert.match(s.howItRuns, /metronome/i);
+  assert.match(s.howItRuns, /scheduler_setup_text/);
+  // Ephemeral guidance — not persisted on the stored strategy.
+  assert.equal(ctx.store.getStrategy(ctx.userId, s.id).howItRuns, undefined);
+});
+
 test("scheduler_setup_text: returns a self-contained, paste-ready metronome prompt", () => {
   const ctx = freshCtx();
   const out = T.scheduler_setup_text.handler(ctx);
