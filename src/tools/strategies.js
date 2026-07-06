@@ -19,7 +19,8 @@ const PARAMS_HELP =
   "Type-specific params (validated): " +
   "dca = {accountId, fromAssetId, toAssetId, amount, schedule}; " +
   "idle_to_stake = {accountId, assetId, threshold}; " +
-  "de_risk = {accountId, assetId, triggerPrice, toAssetId, and exactly one of amount | percent}.";
+  "de_risk = {accountId, assetId, triggerPrice, toAssetId, and exactly one of amount | percent}; " +
+  "price_target = {accountId, assetId, direction ('above'|'below'), targetPrice, fromAssetId, toAssetId, amount}.";
 
 const createTool = {
   name: "strategy_create",
@@ -125,9 +126,10 @@ const setEnabledTool = {
   annotations: CONFIG,
   handler: (ctx, a = {}) => {
     need(ctx);
-    const s = ctx.store.setStrategyEnabled(ctx.userId, a.strategyId, a.enabled);
-    if (!s) throw new Error(`strategy not found: ${a.strategyId}`);
-    return s;
+    if (!ctx.store.getStrategy(ctx.userId, a.strategyId)) throw new Error(`strategy not found: ${a.strategyId}`);
+    // Re-enabling a price trigger re-arms it (per the fire-once/re-arm rule).
+    const patch = a.enabled ? { enabled: true, armed: true } : { enabled: false };
+    return ctx.store.updateStrategy(ctx.userId, a.strategyId, patch);
   },
 };
 
@@ -135,20 +137,24 @@ const runTool = {
   name: "strategy_run",
   title: "Run a strategy (re-check condition, prepare txs)",
   description:
-    "Evaluate one or more strategies against LIVE data and, if the trigger is tripped, PREPARE the transaction(s) — each appears in the Bron app to sign. This is what a Cowork scheduled task calls each cycle; it never acts on stored numbers (it re-reads the live balance/price every run). SAFE TO CALL — preparing does not move funds; signing is on the phone (MPC). Pass strategyId for one, or strategyIds for a batch (each run independently — one failing does not abort the others, and no prepared tx assumes a prior one settled).",
+    "Evaluate strategies against LIVE data and, if a trigger is tripped, PREPARE the transaction(s) — each appears in the Bron app to sign. This is what a scheduled task calls each cycle; it never acts on stored numbers (it re-reads the live balance/price every run). SAFE TO CALL — preparing does not move funds; signing is on the phone (MPC). Omit both ids to evaluate ALL enabled strategies for the user in one call; or pass strategyId for one, or strategyIds for a specific batch (each run independently — one failing does not abort the others, and no prepared tx assumes a prior one settled).",
   inputSchema: {
     type: "object",
     properties: {
       strategyId: { type: "string", description: "Run a single strategy" },
-      strategyIds: { type: "array", items: { type: "string" }, description: "Run several strategies in one call, each independently" },
+      strategyIds: { type: "array", items: { type: "string" }, description: "Run several specific strategies, each independently" },
     },
     additionalProperties: false,
   },
   annotations: REQUEST_ONLY,
   handler: async (ctx, a = {}) => {
     need(ctx);
-    const ids = a.strategyIds && a.strategyIds.length ? a.strategyIds : a.strategyId ? [a.strategyId] : [];
-    if (ids.length === 0) throw new Error("strategy_run needs strategyId or strategyIds");
+    const singleId = !a.strategyIds && a.strategyId;
+    let ids;
+    if (a.strategyIds && a.strategyIds.length) ids = a.strategyIds;
+    else if (a.strategyId) ids = [a.strategyId];
+    // No ids: evaluate every ENABLED strategy for this user.
+    else ids = ctx.store.listStrategies(ctx.userId).filter((s) => s.enabled).map((s) => s.id);
 
     const results = [];
     for (const id of ids) {
@@ -170,7 +176,9 @@ const runTool = {
         results.push({ strategyId: id, type: s.type, error: e.message });
       }
     }
-    return ids.length === 1 ? results[0] : { results };
+    // Single explicit id → return that result directly; otherwise a plain summary.
+    if (singleId) return results[0];
+    return { checked: results.length, fired: results.filter((r) => r.fired).length, results };
   },
 };
 

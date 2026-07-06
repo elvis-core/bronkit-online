@@ -28,7 +28,10 @@ next launch). Tell the user this.
 ## Strategy types (the only ones — all on existing primitives)
 - **dca** — time schedule → swap a fixed amount A→B. params: `accountId, fromAssetId, toAssetId, amount, schedule`.
 - **idle_to_stake** — when live idle balance exceeds a threshold, stake the excess. params: `accountId, assetId, threshold`.
-- **de_risk** — when a live price drops to/below a level, swap a holding to a stable. params: `accountId, assetId, triggerPrice, toAssetId, and exactly one of amount | percent`.
+- **de_risk** — when a live price crosses down to/below a level, swap a holding to a stable. params: `accountId, assetId, triggerPrice, toAssetId, and exactly one of amount | percent`.
+- **price_target** — when a live price crosses to/through a target (above or below), swap. params: `accountId, assetId, direction ('above'|'below'), targetPrice, fromAssetId, toAssetId, amount`.
+
+Price triggers (de_risk, price_target) fire **once per cross**: a strategy created already past its target does NOT fire on creation (a cross is required), and it won't prepare duplicates on repeat ticks — it re-arms only when price crosses back or the user re-enables it.
 
 Do not invent other types (no derivatives/lending primitive exists).
 

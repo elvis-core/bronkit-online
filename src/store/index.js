@@ -112,6 +112,8 @@ export class FileStore {
       trigger: trigger || null,
       enabled: true,
       lastFiredAt: null,
+      lastObservedPrice: null, // price triggers: price seen at the previous run (crossing detection)
+      armed: true, // price triggers: false after firing until it re-crosses / is re-enabled
       scheduledTaskId: null, // the Cowork task that fires this strategy (set by the skill)
       createdAt: new Date().toISOString(),
     };
@@ -137,6 +139,8 @@ export class FileStore {
     if (patch.trigger !== undefined) s.trigger = patch.trigger;
     if (patch.enabled !== undefined) s.enabled = !!patch.enabled;
     if (patch.scheduledTaskId !== undefined) s.scheduledTaskId = patch.scheduledTaskId;
+    if (patch.lastObservedPrice !== undefined) s.lastObservedPrice = patch.lastObservedPrice;
+    if (patch.armed !== undefined) s.armed = !!patch.armed;
     this._save();
     return s;
   }

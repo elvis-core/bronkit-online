@@ -4,18 +4,28 @@
 // (MPC). Firing NEVER acts on stored numbers: it re-reads the live balance/price
 // each run and decides fresh.
 //
-// Only three types, all built on existing tools (no derivatives/lending — no
-// primitive exists):
+// Types, all built on existing tools (no derivatives/lending — no primitive exists):
 //   dca           — time schedule  → swap a fixed amount A->B (bron_tx_swap)
 //   idle_to_stake — idle balance   → stake the excess over a threshold (bron_tx_staking)
-//   de_risk       — price drop     → swap a volatile holding to a stable (bron_tx_swap)
+//   de_risk       — price crosses down to/below a level → swap a holding to a stable
+//   price_target  — price crosses to/through a target (above|below) → swap
+//
+// Price triggers (de_risk, price_target) fire on a CROSSING, once per cross:
+//  - they store the price observed at the previous run (lastObservedPrice);
+//  - fire only when the price moved from the wrong side of the target to the right
+//    side (so a strategy created already past its target does NOT fire — a cross is
+//    required after creation);
+//  - after firing they disarm (armed=false) so coarse (e.g. hourly) ticks don't
+//    prepare duplicates; they re-arm when the price crosses back to the wrong side,
+//    or when the user re-enables the strategy;
+//  - always read the LIVE price at evaluation time, never a stored number.
 
 import Decimal from "decimal.js";
 import { swapTool } from "./tools/intents.js";
 import { stakingTxTool } from "./tools/writes.js";
 import { fetchUsdPriceMap } from "./util/prices.js";
 
-export const STRATEGY_TYPES = ["dca", "idle_to_stake", "de_risk"];
+export const STRATEGY_TYPES = ["dca", "idle_to_stake", "de_risk", "price_target"];
 
 const ws = (ctx) => `/workspaces/${ctx.workspaceId}`;
 const nowIso = () => new Date().toISOString();
@@ -68,6 +78,16 @@ export function validateStrategy(type, params = {}) {
         if (!(n > 0 && n <= 100)) throw new Error("percent must be in (0, 100]");
       }
       return { trigger: { kind: "price_below", assetId: params.assetId, triggerPrice: String(params.triggerPrice) } };
+    }
+    case "price_target": {
+      // "sell/buy when price hits N". accountId added: the swap needs a source account.
+      req(params, ["accountId", "assetId", "direction", "targetPrice", "fromAssetId", "toAssetId", "amount"]);
+      if (params.direction !== "above" && params.direction !== "below") {
+        throw new Error("direction must be 'above' or 'below'");
+      }
+      posAmount(params.targetPrice, "targetPrice");
+      posAmount(params.amount, "amount");
+      return { trigger: { kind: "price_cross", assetId: params.assetId, direction: params.direction, targetPrice: String(params.targetPrice) } };
     }
     default:
       throw new Error(`Unknown strategy type: ${type}. Allowed: ${STRATEGY_TYPES.join(", ")}`);
@@ -134,6 +154,54 @@ async function prepareStake(ctx, { accountId, assetId, amount, description }) {
   }
 }
 
+// ---- price-crossing evaluation (de_risk, price_target) --------------------
+
+// Shared crossing/fire-once engine. Reads the LIVE price, compares against the
+// price at the previous run, and prepares only on a genuine cross from the wrong
+// side of the target to the right side. Persists lastObservedPrice + armed so the
+// decision survives across (coarse) ticks. `isRightSide(price)` returns true when
+// the price is on the "target reached" side; `prepareFn({ price })` builds the tx.
+async function evaluatePriceTrigger(ctx, s, { assetId, target, isRightSide, prepareFn }) {
+  const now = await readPrice(ctx, assetId); // LIVE, every run
+  const prev = s.lastObservedPrice == null || s.lastObservedPrice === "" ? null : dec(s.lastObservedPrice);
+  const armed = s.armed !== false; // default armed
+  const rightNow = isRightSide(now);
+
+  let fired = false;
+  let reason;
+  let prepared = [];
+  let newArmed = armed;
+
+  if (prev == null) {
+    // First run after creation: establish the baseline, never fire. A cross is
+    // required after creation — even if already past target, this run won't fire.
+    reason = `baseline set at ${now} (target ${target}); a cross is required before firing`;
+  } else if (!armed) {
+    // Already fired this cross. Re-arm only when price returns to the wrong side.
+    if (!rightNow) {
+      newArmed = true;
+      reason = `re-armed: price ${now} back on the wrong side of ${target}`;
+    } else {
+      reason = `already fired; price ${now} still past target ${target} — waiting to re-arm`;
+    }
+  } else if (!isRightSide(prev) && rightNow) {
+    // Armed + crossed from wrong side to right side (handles skipping past the
+    // exact target between coarse ticks — we compare sides, not equality).
+    fired = true;
+    newArmed = false;
+    reason = `crossed: price ${prev} -> ${now}, target ${target}`;
+    prepared = await prepareFn({ price: now });
+  } else {
+    reason = rightNow
+      ? `no cross: price ${now} already on the target side of ${target}`
+      : `no cross: price ${now} on the wrong side of ${target}`;
+  }
+
+  // Persist the observed price + armed state for the next tick.
+  ctx.store.updateStrategy(ctx.userId, s.id, { lastObservedPrice: now.toString(), armed: newArmed });
+  return { fired, reason, conditionValue: now.toString(), prepared };
+}
+
 // ---- firing ---------------------------------------------------------------
 
 // Evaluate ONE strategy against live data and prepare transaction(s) if tripped.
@@ -161,19 +229,42 @@ export async function fireStrategy(ctx, s) {
       return { fired: true, reason: `idle ${idle} > threshold ${threshold}`, conditionValue: idle.toString(), prepared };
     }
     case "de_risk": {
-      const price = await readPrice(ctx, p.assetId); // live
-      const trigger = dec(p.triggerPrice);
-      if (price.gt(trigger)) {
-        return { fired: false, reason: `price ${price} > triggerPrice ${trigger}`, conditionValue: price.toString(), prepared: [] };
-      }
-      let amount = p.amount;
-      if (amount == null || amount === "") {
-        const held = await readHeld(ctx, p.accountId, p.assetId); // live
-        amount = held.times(dec(p.percent)).div(100).toString();
-      }
-      const description = rationale(s, `price ${price} <= triggerPrice ${trigger}; de-risking ${amount} of ${p.assetId} -> ${p.toAssetId}`);
-      const prepared = [await prepareSwap(ctx, { accountId: p.accountId, fromAssetId: p.assetId, toAssetId: p.toAssetId, fromAmount: String(amount), description })];
-      return { fired: true, reason: `price ${price} <= triggerPrice ${trigger}`, conditionValue: price.toString(), prepared };
+      // Price crosses DOWN to/below triggerPrice → swap to the stable. Fire-once.
+      const target = dec(p.triggerPrice);
+      return evaluatePriceTrigger(ctx, s, {
+        assetId: p.assetId,
+        target,
+        isRightSide: (price) => price.lte(target),
+        prepareFn: async ({ price }) => {
+          let amount = p.amount;
+          if (amount == null || amount === "") {
+            const held = await readHeld(ctx, p.accountId, p.assetId); // live
+            amount = held.times(dec(p.percent)).div(100).toString();
+          }
+          const description = rationale(
+            s,
+            `de_risk: ${p.assetId} price ${price} crossed <= target ${target} — swapping ${amount} ${p.assetId} -> ${p.toAssetId}`
+          );
+          return [await prepareSwap(ctx, { accountId: p.accountId, fromAssetId: p.assetId, toAssetId: p.toAssetId, fromAmount: String(amount), description })];
+        },
+      });
+    }
+    case "price_target": {
+      // Price crosses to/through targetPrice in `direction` → swap. Fire-once.
+      const target = dec(p.targetPrice);
+      const isRightSide = p.direction === "above" ? (price) => price.gte(target) : (price) => price.lte(target);
+      return evaluatePriceTrigger(ctx, s, {
+        assetId: p.assetId,
+        target,
+        isRightSide,
+        prepareFn: async ({ price }) => {
+          const description = rationale(
+            s,
+            `price_target: ${p.assetId} hit ${price}, target ${target} (${p.direction}) — swapping ${p.amount} ${p.fromAssetId} -> ${p.toAssetId}`
+          );
+          return [await prepareSwap(ctx, { accountId: p.accountId, fromAssetId: p.fromAssetId, toAssetId: p.toAssetId, fromAmount: String(p.amount), description })];
+        },
+      });
     }
     default:
       throw new Error(`Unknown strategy type: ${s.type}`);
