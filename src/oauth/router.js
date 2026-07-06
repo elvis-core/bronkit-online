@@ -14,6 +14,10 @@ import { mintAccessToken, mintRefreshToken, verifyToken, pkceVerify } from "./to
 
 const AUTH_CODE_TTL_MS = 5 * 60 * 1000;
 
+// Diagnostic log for the OAuth handshake. NEVER logs the JWK, codes, verifiers,
+// or tokens — only which branch each request took, so a stuck connect is visible.
+const olog = (m) => process.stderr.write(`[oauth] ${m}\n`);
+
 function cors(res) {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -85,6 +89,7 @@ export function mountOAuth(app, store) {
       client_name: typeof body.client_name === "string" ? body.client_name : "",
       token_endpoint_auth_method: "none",
     });
+    olog(`register: client ${client.client_id} redirects=${redirect_uris.join(" ")}`);
     return res.status(201).json({
       client_id: client.client_id,
       client_id_issued_at: Math.floor(Date.parse(client.created_at) / 1000),
@@ -101,12 +106,17 @@ export function mountOAuth(app, store) {
   app.get("/oauth/authorize", (req, res) => {
     const q = req.query || {};
     const client = q.client_id && store.getClient(String(q.client_id));
-    if (!client) return htmlError(res, 400, "Unknown or unregistered client.");
+    if (!client) {
+      olog(`authorize: unknown client_id=${q.client_id || "(none)"}`);
+      return htmlError(res, 400, "Unknown or unregistered client.");
+    }
     if (!q.redirect_uri || !client.redirect_uris.includes(String(q.redirect_uri))) {
+      olog(`authorize: redirect_uri mismatch for client ${q.client_id}: ${q.redirect_uri || "(none)"}`);
       return htmlError(res, 400, "redirect_uri does not match a registered value for this client.");
     }
     // From here redirect_uri is trusted — protocol errors go back to the client.
     const redirectErr = (code) => {
+      olog(`authorize: protocol error ${code} (client ${q.client_id})`);
       const u = new URL(String(q.redirect_uri));
       u.searchParams.set("error", code);
       if (q.state) u.searchParams.set("state", String(q.state));
@@ -124,6 +134,7 @@ export function mountOAuth(app, store) {
       scope: q.scope ? String(q.scope) : "bron",
       resource: q.resource ? String(q.resource) : "",
     };
+    olog(`authorize: JWK page served (client ${params.client_id})`);
     res.type("html").send(renderConnectPage({ actionUrl: `${publicUrl()}/oauth/callback`, params }));
   });
 
@@ -132,8 +143,12 @@ export function mountOAuth(app, store) {
   app.post("/oauth/callback", (req, res) => {
     const b = req.body || {};
     const client = b.client_id && store.getClient(String(b.client_id));
-    if (!client) return htmlError(res, 400, "Unknown client.");
+    if (!client) {
+      olog(`callback: unknown client_id=${b.client_id || "(none)"}`);
+      return htmlError(res, 400, "Unknown client.");
+    }
     if (!b.redirect_uri || !client.redirect_uris.includes(String(b.redirect_uri))) {
+      olog(`callback: redirect_uri mismatch for client ${b.client_id}`);
       return htmlError(res, 400, "redirect_uri mismatch.");
     }
 
@@ -156,12 +171,17 @@ export function mountOAuth(app, store) {
     try {
       parseJwk(jwkRaw);
     } catch {
+      olog("callback: JWK failed shape validation — page reshown"); // never log the key itself
       return reshow("That doesn't look like a valid Bron ES256 JWK (need kty=EC, crv=P-256, with a private 'd'). Paste the full key JSON and try again.");
     }
     const workspaceId = typeof b.workspaceId === "string" ? b.workspaceId.trim() : "";
-    if (!workspaceId) return reshow("Workspace ID is required.");
+    if (!workspaceId) {
+      olog("callback: missing workspaceId — page reshown");
+      return reshow("Workspace ID is required.");
+    }
 
     const userId = store.createUser({ jwkCiphertext: encryptSecret(jwkRaw), workspaceId });
+    olog(`callback: code issued (client ${params.client_id}, user ${userId})`);
     const code = randomToken(32);
     store.saveAuthCode(code, {
       userId,
@@ -186,17 +206,31 @@ export function mountOAuth(app, store) {
 
     if (grant === "authorization_code") {
       const code = b.code && store.consumeAuthCode(String(b.code));
-      if (!code) return res.status(400).json({ error: "invalid_grant", error_description: "unknown or used code" });
-      if (code.expiresAt < Date.now()) return res.status(400).json({ error: "invalid_grant", error_description: "code expired" });
-      if (String(b.client_id || "") !== code.clientId) return res.status(400).json({ error: "invalid_grant", error_description: "client mismatch" });
-      if (String(b.redirect_uri || "") !== code.redirectUri) return res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
+      if (!code) {
+        olog(`token: code unknown-or-already-used (client ${b.client_id || "(none)"})`);
+        return res.status(400).json({ error: "invalid_grant", error_description: "unknown or used code" });
+      }
+      if (code.expiresAt < Date.now()) {
+        olog(`token: code expired (client ${b.client_id})`);
+        return res.status(400).json({ error: "invalid_grant", error_description: "code expired" });
+      }
+      if (String(b.client_id || "") !== code.clientId) {
+        olog(`token: client mismatch (got ${b.client_id || "(none)"}, code was for ${code.clientId})`);
+        return res.status(400).json({ error: "invalid_grant", error_description: "client mismatch" });
+      }
+      if (String(b.redirect_uri || "") !== code.redirectUri) {
+        olog(`token: redirect_uri mismatch (got ${b.redirect_uri || "(none)"}, code had ${code.redirectUri})`);
+        return res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri mismatch" });
+      }
       if (!pkceVerify(String(b.code_verifier || ""), code.codeChallenge, code.codeChallengeMethod)) {
+        olog(`token: PKCE verification failed (client ${b.client_id})`);
         return res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
       }
       const [access_token, refresh_token] = await Promise.all([
         mintAccessToken(code.userId),
         mintRefreshToken(code.userId),
       ]);
+      olog(`token: authorization_code ok (user ${code.userId})`);
       return res.json({ access_token, token_type: "Bearer", expires_in: 3600, refresh_token, scope: "bron" });
     }
 
@@ -204,16 +238,19 @@ export function mountOAuth(app, store) {
       let payload;
       try {
         payload = await verifyToken(String(b.refresh_token || ""), "refresh");
-      } catch {
+      } catch (e) {
+        olog(`token: refresh rejected (${e.message})`);
         return res.status(400).json({ error: "invalid_grant", error_description: "invalid refresh token" });
       }
       const [access_token, refresh_token] = await Promise.all([
         mintAccessToken(payload.sub),
         mintRefreshToken(payload.sub),
       ]);
+      olog(`token: refresh ok (user ${payload.sub})`);
       return res.json({ access_token, token_type: "Bearer", expires_in: 3600, refresh_token, scope: "bron" });
     }
 
+    olog(`token: unsupported grant_type=${grant || "(none)"}`);
     return res.status(400).json({ error: "unsupported_grant_type" });
   });
 }

@@ -28,6 +28,15 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "256kb" }));
 app.use(express.urlencoded({ extended: false, limit: "256kb" }));
 
+// Diagnostic request log for the handshake paths (no bodies, no tokens): shows
+// the exact sequence a connecting client walks and where it stops.
+app.use((req, res, next) => {
+  if (/^\/(oauth|mcp$|\.well-known)/.test(req.path)) {
+    res.on("finish", () => process.stderr.write(`[http] ${req.method} ${req.path} -> ${res.statusCode}\n`));
+  }
+  next();
+});
+
 // OAuth discovery + endpoints (well-known metadata, register, authorize, callback, token).
 mountOAuth(app, store);
 
@@ -44,21 +53,30 @@ function unauthorized(res) {
 // Resolve the Bearer access token to that user's request context. Returns null
 // (caller sends 401) on any failure. Never logs the token or the JWK.
 async function resolveCtx(req) {
+  const mlog = (m) => process.stderr.write(`[mcp] ${m}\n`); // reasons only — never the token/JWK
   const header = req.headers.authorization || "";
   const m = /^Bearer\s+(.+)$/i.exec(header);
-  if (!m) return null;
+  if (!m) {
+    mlog("401: no bearer token (discovery probe or client lost its token)");
+    return null;
+  }
   let payload;
   try {
     payload = await verifyToken(m[1], "access");
-  } catch {
+  } catch (e) {
+    mlog(`401: token verify failed (${e.message})`);
     return null;
   }
   const user = store.getUser(payload.sub);
-  if (!user) return null;
+  if (!user) {
+    mlog(`401: token is valid but user ${payload.sub} is NOT in the store (store lost?)`);
+    return null;
+  }
   let jwk;
   try {
     jwk = decryptSecret(user.jwkCiphertext);
   } catch {
+    mlog(`401: stored JWK decrypt failed for user ${payload.sub} (master key changed?)`);
     return null;
   }
   // userId + store let the strategy tools scope per-user config; client +
