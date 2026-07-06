@@ -26,7 +26,7 @@ const createTool = {
   name: "strategy_create",
   title: "Create a strategy",
   description:
-    "Create a standing strategy that PREPARES transactions automatically when its trigger fires (a Cowork scheduled task is the clock). Standing authorisation to prepare only — signing always happens on the phone. Types: dca (time-scheduled swap), idle_to_stake (stake idle balance over a threshold), de_risk (swap to stable when a price drops). " +
+    "Create a standing strategy that PREPARES transactions automatically when its trigger fires (the hourly Cowork \"metronome\" task is the clock — see scheduler_setup_text). Standing authorisation to prepare only — signing always happens on the phone. Types: dca (time-scheduled swap), idle_to_stake (stake idle balance over a threshold), de_risk (swap to a stable when a price crosses down to/below a level), price_target (swap when a price crosses a target, direction above|below). " +
     PARAMS_HELP,
   inputSchema: {
     type: "object",
@@ -133,6 +133,40 @@ const setEnabledTool = {
   },
 };
 
+// The ONE recurring Cowork task ("metronome") the user pastes in once. Each hourly
+// run calls strategy_run with no ids → every enabled strategy is evaluated against
+// live data. Self-contained: a scheduled run starts fresh with no chat memory, so it
+// names the connector, the call, the reporting, and the sign reminder explicitly.
+const SCHEDULER_PASTE_TEXT =
+`Every hour, using the Bron (bronkit) connector, call strategy_run with no strategy ids — this evaluates all of my enabled treasury strategies against live prices and balances.
+
+Then tell me in plain language: which strategies you checked, the live values you saw (prices and balances), and any transactions you prepared and why — include each strategy's rationale.
+
+If you prepared any transactions, remind me they are waiting in the Bron app for me to sign; nothing moves until I approve them there.`;
+
+const schedulerSetupTextTool = {
+  name: "scheduler_setup_text",
+  title: "Get the Cowork metronome paste text",
+  description:
+    "Return the paste-ready prompt for the ONE recurring Cowork scheduled task (the \"metronome\") that drives every strategy. Hand its pasteText to the user: they open Cowork, type /schedule, paste it, and confirm — that hourly task then calls strategy_run (no ids) to evaluate all enabled strategies. This is a ONE-TIME setup; afterwards the user adds/pauses/deletes strategies in chat and the metronome picks up the change on its next run — no more Cowork visits. You (an MCP connector) CANNOT create the Cowork task yourself; never claim you did. Read-only: returns text, creates nothing.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  annotations: READ,
+  handler: (ctx) => {
+    need(ctx);
+    return {
+      pasteText: SCHEDULER_PASTE_TEXT,
+      cadence: "hourly",
+      installInCowork: [
+        "Open Cowork.",
+        "Type /schedule.",
+        "Paste the pasteText exactly as-is.",
+        "Confirm to create the recurring metronome task.",
+      ],
+      note: "One-time setup. After this, add / pause / delete strategies in chat with the strategy_* tools — the metronome evaluates whatever is enabled on its next hourly run, with zero further Cowork visits.",
+    };
+  },
+};
+
 const runTool = {
   name: "strategy_run",
   title: "Run a strategy (re-check condition, prepare txs)",
@@ -182,4 +216,4 @@ const runTool = {
   },
 };
 
-export const strategyTools = [createTool, listTool, updateTool, deleteTool, setEnabledTool, runTool];
+export const strategyTools = [createTool, listTool, updateTool, deleteTool, setEnabledTool, runTool, schedulerSetupTextTool];

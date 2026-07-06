@@ -227,6 +227,20 @@ test("batched fire: each strategy independent; one bad id does not abort the res
   assert.equal(out.results[1].error, "not found");
 });
 
+test("scheduler_setup_text: returns a self-contained, paste-ready metronome prompt", () => {
+  const ctx = freshCtx();
+  const out = T.scheduler_setup_text.handler(ctx);
+  assert.ok(typeof out.pasteText === "string" && out.pasteText.length > 0);
+  // Self-contained: names the tool + connector, the no-ids semantics, and the sign reminder.
+  assert.match(out.pasteText, /strategy_run/);
+  assert.match(out.pasteText, /bronkit/i);
+  assert.match(out.pasteText, /hour/i);
+  assert.match(out.pasteText, /no strategy ids/i);
+  assert.match(out.pasteText, /Bron app/);
+  // Presents the two-step Cowork install (/schedule → paste → confirm).
+  assert.ok(Array.isArray(out.installInCowork) && out.installInCowork.some((s) => /schedule/i.test(s)));
+});
+
 test("disabled strategy is skipped on fire", async () => {
   const ctx = freshCtx();
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "x" }, enabled: false });

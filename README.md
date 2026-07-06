@@ -41,6 +41,18 @@ The server never moves funds: withdrawal/staking tools only **create requests**;
 final approval happens in the Bron app (biometric + MPC), exactly as in local
 bronkit.
 
+## Automatic strategies
+
+Users can automate recurring/conditional treasury actions — DCA, idle→stake,
+de-risk, price-target — set up and managed **entirely in chat** with the
+`strategy_*` tools. Firing is driven by ONE recurring Cowork task (the
+**metronome**) the user pastes in **once**: every hour it calls `strategy_run`
+(no ids), which evaluates all their enabled strategies against live prices and
+prepares any triggered transactions (each still signed in the Bron app). After
+that one-time setup, adding/pausing/deleting strategies in chat changes what fires
+on the next tick — no further Cowork visits. Full flow, tools, and types in
+**[DEPLOY.md §7](DEPLOY.md#7-automatic-strategies-the-metronome)**.
+
 ## Layout
 
 ```

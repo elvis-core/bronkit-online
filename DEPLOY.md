@@ -124,52 +124,69 @@ docker run ... -v bronkit-data:/app/data -e STORE_PATH=/app/data/store.json bron
 
 ---
 
-## 7. Scheduled strategies (skill-driven, fired by Cowork tasks)
+## 7. Automatic strategies (the metronome)
 
-A **strategy** is stored config the user sets up in chat. When its trigger fires,
-the server PREPARES transaction(s); each lands in the Bron app to sign. Standing
-authorisation to **prepare** — never to sign (signing stays on the phone, MPC).
+A **strategy** is stored config the user sets up **in chat**. When its trigger
+fires, the server PREPARES transaction(s); each lands in the Bron app to sign.
+Standing authorisation to **prepare** — never to sign (signing stays on the phone,
+MPC).
 
-**The split (important):** an MCP server cannot call another server's tools, so
-bronkit cannot create a Cowork scheduled task itself. The orchestration is in two
-halves:
-- **bronkit-online** stores strategies and exposes the tools:
-  `strategy_create / list / update / delete / set_enabled`, plus **`strategy_run`**
-  — which re-reads the **live** balance/price, decides, and prepares via
-  `bron_tx_swap` / `bron_tx_staking`. It never acts on stored numbers.
-- **Claude**, guided by the committed skill
-  [`.claude/skills/bronkit-strategies`](.claude/skills/bronkit-strategies/SKILL.md),
-  is what calls the Cowork tool **`create_scheduled_task`**. The scheduled task's
-  prompt then calls `strategy_run` each cycle. The same orchestration is also
-  embedded in the MCP `instructions` so it reaches users connecting via the
-  connector (who don't have the repo skill loaded).
+Two separate parts:
 
-**The user never touches the Cowork UI.** They just ask in chat — e.g. *"DCA $10
-USDC→ETH from account X every morning"* — and the skill/instructions drive Claude to:
-1. `strategy_create` → store it, get an `id`;
-2. `create_scheduled_task` (recurring, cadence from the strategy) with prompt
-   *"Call bronkit strategy_run for strategy <id>. If it prepared any transactions,
-   tell me what and why. Do not sign anything."*;
-3. `strategy_update(strategyId, scheduledTaskId)` → link the two halves so
-   pause/delete updates both.
+- **Strategies** — created and managed entirely in chat with
+  `strategy_create / list / update / set_enabled / delete`, plus **`strategy_run`**,
+  which re-reads the **live** balance/price, decides, and prepares via
+  `bron_tx_swap` / `bron_tx_staking`. It never acts on stored numbers. Strategies
+  live in the central store, so any Claude session (or the metronome) sees the same
+  set.
+- **The metronome** — ONE recurring Cowork scheduled task the user sets up **once**.
+  Each hour it calls `strategy_run` with **no ids**, evaluating **every enabled
+  strategy** in one pass. Because it always evaluates whatever is enabled *right
+  now*, the store is the single source of truth.
 
-On each fire, `strategy_run` re-checks the live condition and, if tripped, prepares
-the transaction(s) — each appears in the Bron app to sign with a rationale (which
-strategy, the trigger value) in the description. Batches are independent.
+**One-time setup.** An MCP connector cannot create a Cowork task, so Claude hands
+the user the paste line instead of scheduling anything itself:
+
+1. In chat: *"activate / start my strategies automatically."* Claude calls
+   `strategy_list` (shows what's enabled) then **`scheduler_setup_text`** and
+   presents its `pasteText`.
+2. The user: **open Cowork → type `/schedule` → paste it → confirm.** That creates
+   the hourly metronome. The pasted prompt is self-contained — each run calls
+   `strategy_run` (no ids) on the bronkit connector and reports what it checked,
+   the live values, and any prepared txs (with rationale + a reminder to sign in
+   the Bron app).
+
+**After that, zero Cowork visits.** Adding, pausing (`strategy_set_enabled`), or
+deleting a strategy in chat changes what the metronome prepares on its next tick —
+the schedule never changes, only the store does. This is driven both by the
+committed skill [`.claude/skills/bronkit-strategies`](.claude/skills/bronkit-strategies/SKILL.md)
+and by the same guidance embedded in the MCP `instructions` (so it reaches
+connector users who don't have the repo skill loaded).
+
+On each tick, `strategy_run` re-checks the live condition per strategy and, if
+tripped, prepares the transaction(s) — each appears in the Bron app to sign with a
+rationale (which strategy, the trigger value) in the description. Strategies are
+evaluated independently; one failing does not abort the rest.
 
 **Strategy types** (existing primitives only — no derivatives/lending):
 - `dca` — time schedule → swap a fixed amount A→B. params: `accountId,
   fromAssetId, toAssetId, amount, schedule`.
 - `idle_to_stake` — when live idle balance exceeds a threshold, stake the excess.
   params: `accountId, assetId, threshold`.
-- `de_risk` — when a live price drops to/below a level, swap to a stable. params:
-  `accountId, assetId, triggerPrice, toAssetId, and one of amount | percent`.
+- `de_risk` — when a live price crosses down to/below a level, swap to a stable.
+  params: `accountId, assetId, triggerPrice, toAssetId, and one of amount | percent`.
+- `price_target` — when a live price crosses to/through a target (above or below),
+  swap. params: `accountId, assetId, direction ('above'|'below'), targetPrice,
+  fromAssetId, toAssetId, amount`.
 
-**Constraints (honest):** firing only happens while the user's computer + Claude
-are available (no server-side 24/7 worker yet); and swaps have a short signing
-window, so a scheduled swap still needs the user to sign promptly on the phone.
-The Cowork scheduled task must also have the bronkit connector available at run
-time — verify with one real run.
+Price triggers (`de_risk`, `price_target`) fire **once per cross** — a strategy
+created already past its target does not fire until price actually crosses, and it
+won't duplicate on repeat ticks.
+
+**Constraints (honest):** the metronome must have the bronkit connector available
+at run time — verify with one real run. Swaps have a short signing window, so a
+prepared swap still needs the user to sign promptly on the phone or it re-fires next
+cycle.
 
 ---
 
@@ -181,11 +198,11 @@ This is a POC for UX testing. Before real use, a dev team should harden:
   in `src/store/index.js` for a real database — the interface is small and
   isolated for exactly this. Strategies live in the same store (config, not
   secret) and require the mounted volume to survive redeploys.
-- **Strategy firing is live-verified only for swaps.** `strategy_fire` → swap
-  (dca / de_risk) prepares a signable `intents` transaction end-to-end. The
-  `idle_to_stake` path prepares a `stake-delegation` transaction whose live
-  acceptance has been mock-tested but not yet exercised against the real Bron API
-  — verify with one real fire before relying on it.
+- **Strategy firing is live-verified only for swaps.** `strategy_run` → swap
+  (dca / de_risk / price_target) prepares a signable `intents` transaction
+  end-to-end. The `idle_to_stake` path prepares a `stake-delegation` transaction
+  whose live acceptance has been mock-tested but not yet exercised against the real
+  Bron API — verify with one real fire before relying on it.
 - **Token lifecycle:** refresh tokens are stateless JWTs and cannot be revoked
   individually; there is no per-user logout/rotation.
 - **Preferences:** the `bron_preferences` tool writes a single shared
