@@ -314,6 +314,17 @@ test("dca cadence gate: no-ids sweep fires only when due; explicit id forces", a
   assert.match(forced.reason, /forced/);
 });
 
+test("swap with no solver: NOT ok, no signable tx, reason explains it is a Bron auction matter (not a false success)", async () => {
+  // Intent stalls unpriced with a passed deadline → no solver ever bids → no tx.
+  const ctx = freshCtx({ intentGet: { status: "user-initiated", userSettlementDeadline: Date.now() - 1000 } });
+  const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", amount: "20", schedule: "hourly" } });
+  const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
+  assert.equal(out.prepared[0].ok, false, "no signable tx => not a success");
+  assert.equal(out.prepared[0].result.signableTransactionId, undefined, "nothing to sign");
+  assert.ok(/solver|auction|expire|sign/i.test(out.prepared[0].reason || ""), "reason explains why there is no tx");
+  assert.ok(!ctx.client.calls.some((c) => c.path.endsWith("/transactions")), "no signable tx was created");
+});
+
 test("swap 409 conflict: reported cleanly (not a false success), no signable tx, sweep survives", async () => {
   const ctx = freshCtx({ intentConflict: true });
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", amount: "20", schedule: "hourly" } });

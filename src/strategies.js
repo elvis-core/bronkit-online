@@ -154,14 +154,19 @@ async function prepareSwap(ctx, { accountId, fromAssetId, toAssetId, fromAmount,
       description,
       maxWaitSeconds: 60,
     });
-    // A 409 conflict comes back as result.conflict (the swap tool no longer throws
-    // on it) — it is NOT a success even though no signable-tx error is present.
+    // A swap only SUCCEEDED if it produced a signable transaction to sign. If no
+    // solver priced the intent (it stalled at user-initiated / expired), there is
+    // nothing to sign — that is NOT success, and it is a Bron auction/liquidity
+    // matter, not a bronkit error. A 409 conflict (result.conflict) is also not ok.
+    const madeSignableTx = !!result.signableTransactionId;
     return {
-      ok: !result.conflict && !result.signableTransactionError,
+      ok: madeSignableTx,
       kind: "swap",
       description,
       result,
-      ...(result.conflict ? { error: result.conflictError || "conflict", reason: result.guidance } : {}),
+      ...(madeSignableTx
+        ? {}
+        : { reason: result.guidance || (result.conflict ? result.conflictError || "conflict" : "no solver priced the intent — nothing to sign") }),
     };
   } catch (e) {
     return { ok: false, kind: "swap", description, error: e.message };
