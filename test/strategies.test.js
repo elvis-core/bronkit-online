@@ -255,12 +255,13 @@ test("strategy_create result explains the beat honestly (howItRuns): not self-ru
   const ctx = freshCtx();
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
   assert.ok(typeof s.howItRuns === "string");
-  assert.match(s.howItRuns, /NOT self-running/);
-  assert.match(s.howItRuns, /live Claude session calls strategy_run/);
-  assert.match(s.howItRuns, /while a Claude session is alive/i);
+  assert.match(s.howItRuns, /does NOT run on its own/);
+  assert.match(s.howItRuns, /evaluated only when a live Claude session calls strategy_run/);
+  assert.match(s.howItRuns, /phone/i); // reliable-on-any-device path stated
+  assert.match(s.howItRuns, /ONLY on Claude DESKTOP/); // recurring is desktop-only, honestly
   assert.match(s.howItRuns, /24\/7/); // states the honest limit
-  // Surface-neutral: no forced Cowork/desktop flow baked into the guidance.
-  assert.doesNotMatch(s.howItRuns, /cowork|\/schedule/i);
+  // No stale Cowork branding baked into the guidance.
+  assert.doesNotMatch(s.howItRuns, /cowork/i);
   // Ephemeral guidance — not persisted on the stored strategy.
   assert.equal(ctx.store.getStrategy(ctx.userId, s.id).howItRuns, undefined);
 });
@@ -274,10 +275,11 @@ test("scheduler_setup_text: surface-neutral, self-contained prompt + honest 'run
   assert.match(out.pasteText, /bronkit/i);
   assert.match(out.pasteText, /no strategy ids/i);
   assert.match(out.pasteText, /Bron app/);
-  // Surface-neutral: does NOT hardcode a specific Claude surface (no Cowork/ /schedule).
-  assert.doesNotMatch(JSON.stringify(out), /cowork|\/schedule/i);
-  // States the honest limitation and offers guidance instead of a forced flow.
-  assert.match(out.honestLimit, /only runs while/i);
+  // No stale Cowork branding.
+  assert.doesNotMatch(JSON.stringify(out), /cowork/i);
+  // States the honest limitation: runs only while alive, desktop-only recurring, not 24/7.
+  assert.match(out.honestLimit, /only while a Claude session/i);
+  assert.match(out.honestLimit, /Claude Desktop/);
   assert.match(out.honestLimit, /24\/7/);
   assert.ok(typeof out.howToUse === "string");
 });

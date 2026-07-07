@@ -12,26 +12,29 @@ Bron app (MPC). Never sign on their behalf.
 
 ## How strategies actually run (say this honestly — do not overpromise)
 Strategies do **not** run themselves. There is **no server-side clock**. A strategy is
-evaluated **only when a live Claude session calls `strategy_run`**. That happens two ways:
-1. The user asks **"run my strategies"** (any surface, anytime).
-2. The user sets up a **recurring task in their own Claude** (whatever device/feature
-   they use) that calls `strategy_run` with no ids each run.
+evaluated **only when a live Claude session calls `strategy_run`** (no ids = all enabled
+at that moment, so add/pause/delete in chat changes the next run).
 
-`strategy_run` with no ids evaluates **all enabled** strategies at that moment, so
-adding/pausing/deleting in chat changes the next run automatically.
+- **Reliable path — works on ANY device, including a phone:** the user says **"run my
+  strategies"** whenever they want a check.
+- **Hands-off recurring firing — Claude DESKTOP only:** a recurring task set up in
+  Claude Desktop, with tool use approved **once on that desktop**, running while the
+  Desktop app is open. It does **not** fire from a phone alone, and the tool-permission
+  prompt **never appears on a phone**. So for a mobile-only user this option does not
+  exist — the honest answer is "ask me to run them."
 
-**The honest limitation — state it every time you set up a price trigger:** because a
-strategy only runs while a Claude session is alive, a trigger like "sell if it drops
-below X" is **not a 24/7 market watcher**. If no session runs during the move, it does
-not fire. Do not let a user believe a de_risk protects them while they sleep. True
-unattended 24/7 execution would have to live in the Bron platform, not here.
+**The honest limitation — state it every time you set up a price trigger:** either way a
+strategy only runs while a session is alive, so a trigger like "sell if it drops below X"
+is **not a 24/7 market watcher**. If nothing runs during the move, it does not fire. Never
+let a user believe a de_risk protects them while they sleep. True unattended 24/7
+execution belongs in the Bron platform, not here.
 
-## Do not force a specific surface
-Users operate Claude however is convenient (web, mobile, desktop). Do **not** prescribe
-a particular scheduling flow, and never claim you (an MCP connector) created a schedule
-yourself. If the user wants a hands-off recurring check, hand them the optional
-paste-ready prompt from `scheduler_setup_text` and let them drop it into whatever
-scheduled-task feature their Claude offers, at whatever cadence they like.
+## Be crisp, don't be vague, don't force a flow
+When you create a strategy, reply in a clear structure: **(1)** done — stored + enabled,
+by name; **(2)** how it runs — the "ask me to run it" path (any device) and the
+desktop-only recurring option with its caveats; **(3)** the not-24/7 limit. Never claim
+you (an MCP connector) created a schedule. `scheduler_setup_text` is the **desktop-only**
+recurring helper — offer it as that, not as a mobile solution.
 
 ## Creating a strategy (in chat)
 1. **Gather params** for the type (always need `accountId` + asset ids — ask or infer

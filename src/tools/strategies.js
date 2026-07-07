@@ -50,9 +50,16 @@ const createTool = {
     if (a.enabled === false) ctx.store.setStrategyEnabled(ctx.userId, s.id, false);
     return {
       ...ctx.store.getStrategy(ctx.userId, s.id),
-      // Not persisted — the honest beat explanation the assistant must relay verbatim.
+      // Not persisted — crisp, mobile-honest beat explanation the assistant must relay.
+      // Structure the reply exactly: (1) confirm done, (2) how it runs, (3) next step.
       howItRuns:
-        "Stored, but NOT self-running. Nothing on this server wakes up on its own — the strategy is evaluated ONLY when a live Claude session calls strategy_run. Two ways that happens: (1) the user asks 'run my strategies' anytime; (2) the user sets up a recurring task in Claude (on whichever device they use) that calls strategy_run — which then evaluates ALL their enabled strategies each run. Tell the user this plainly, and tell them the honest limit: it runs only WHILE a Claude session is alive, so a price trigger like 'sell if it drops below X' does NOT watch the market 24/7 — if no session runs during the drop, it won't fire. For a hands-off recurring check, offer scheduler_setup_text (a ready-to-paste prompt for Claude's scheduler). Do not promise unattended 24/7 firing.",
+        "Give the user a CRISP, structured reply — not a vague paragraph:\n" +
+        "1) DONE: say the strategy is stored + enabled, by its name.\n" +
+        "2) HOW IT RUNS (be blunt): it does NOT run on its own — nothing here fires on a timer. It is evaluated only when a live Claude session calls strategy_run.\n" +
+        "   • Reliable path, works on ANY device incl. a phone: the user says 'run my strategies' whenever they want a check; you then evaluate all enabled strategies and prepare any that trigger.\n" +
+        "   • Hands-off recurring firing is possible ONLY on Claude DESKTOP: set up a recurring task there and approve tool use once ON that desktop; it runs while the Desktop app is open. It does NOT fire from a phone alone, and that permission prompt never appears on a phone.\n" +
+        "3) HONEST LIMIT: either way it is NOT a 24/7 market watcher — if nothing runs during a price move, a price trigger won't fire.\n" +
+        "If the user is on mobile, say so plainly: the working option is to ask you to run the strategies; true scheduling needs Claude Desktop. Never imply unattended mobile automation exists.",
     };
   },
 };
@@ -168,9 +175,9 @@ const schedulerSetupTextTool = {
     return {
       pasteText: SCHEDULER_PASTE_TEXT,
       howToUse:
-        "Optional. Put this prompt into any recurring-task feature your Claude offers (e.g. a scheduled task on the device you use). Pick your own cadence (hourly is typical). It evaluates whatever strategies are enabled at that moment — add/pause/delete strategies in chat and the next run reflects it.",
+        "Optional, DESKTOP-ONLY. Put this prompt into a recurring task in Claude Desktop and approve tool use once on that desktop; it then evaluates all enabled strategies each run while the Desktop app is open. It is NOT usable from a phone — the tool-permission prompt appears on the desktop, never on mobile. On a phone, the working path is simply to ask 'run my strategies'.",
       honestLimit:
-        "It only runs while that Claude session/app is alive. There is no server-side 24/7 watcher, so a price trigger will NOT fire during a market move if no session runs then. For guaranteed unattended execution, that has to live in the Bron platform, not here.",
+        "Runs only while a Claude session/app is alive; there is no server-side clock. A recurring task needs Claude Desktop (permission granted on that desktop) and will not fire from a phone alone. Not a 24/7 market watcher — a price trigger won't fire if nothing runs during the move. Guaranteed unattended execution would have to live in the Bron platform, not here.",
     };
   },
 };
