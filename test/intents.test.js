@@ -224,3 +224,27 @@ test("ApiError carries status/code/requestId in the message (no more bare upstre
   assert.equal(err.status, 500);
   assert.equal(err.bronMessage, "Something went wrong. Please try again");
 });
+
+test("expired but PRICED: reports everPriced/expiredAfterPricing, guidance blames the ~40s window, NOT solvers", async () => {
+  // Solver priced it (price + toAmount present) but the settlement deadline passed.
+  const priced = { status: "auction-in-progress", price: "6.5", fromAmount: "100", toAmount: "654", userSettlementDeadline: Date.now() - 1000 };
+  const ctx = mockCtx({ createResp: { status: "user-initiated" }, getSeq: [priced] });
+  const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "a", toAssetId: "b", fromAmount: "100", maxWaitSeconds: 1 });
+  assert.equal(out.expired, true);
+  assert.equal(out.everPriced, true, "a price was present -> everPriced");
+  assert.equal(out.expiredAfterPricing, true);
+  assert.match(out.guidance, /PRICED/);
+  assert.match(out.guidance, /window|sign/i);
+  assert.doesNotMatch(out.guidance, /no solver|nothing bid/i);
+  // No signable tx (deadline passed) and it did not falsely claim a liquidity gap.
+  assert.equal(out.signableTransactionId, undefined);
+});
+
+test("expired and NEVER priced: honestly reports no bid (everPriced false)", async () => {
+  const unpriced = { status: "user-initiated", userSettlementDeadline: Date.now() - 1000 };
+  const ctx = mockCtx({ createResp: { status: "user-initiated" }, getSeq: [unpriced] });
+  const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "a", toAssetId: "b", fromAmount: "100", maxWaitSeconds: 1 });
+  assert.equal(out.expired, true);
+  assert.equal(out.everPriced, false);
+  assert.match(out.guidance, /no solver|no bid/i);
+});

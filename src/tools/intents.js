@@ -207,6 +207,8 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
   const signableTransactionId = tx ? tx.transactionId || (tx.transaction && tx.transaction.transactionId) || null : null;
   const signableStatus = tx ? tx.status || (tx.transaction && tx.transaction.status) || null : null;
 
+  // A solver priced it at some point iff the intent ever carried a positive price.
+  const everPriced = !!(last && Number(last.price) > 0);
   let guidance;
   if (tx) {
     guidance =
@@ -219,10 +221,11 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
   } else if (terminal) {
     guidance = `Swap ended: ${status}.`;
   } else if (expired) {
-    guidance =
-      `The deadline passed while the intent was still at '${status}', so it can no longer be signed or settled — it's dead. ` +
-      "It never advanced through the solver auction (nothing bid on it in time), so no signable transaction was ever produced. " +
-      "This is a Bron-side auction/solver matter, not a bronkit issue: where no solvers are bidding (e.g. a quiet testnet) intents stall at 'user-initiated' and expire.";
+    // Distinguish the two very different expiry causes — DON'T claim "no solver"
+    // when the intent actually got a price (that misdiagnosis wasted hours).
+    guidance = everPriced
+      ? `A solver PRICED this swap (you would have received ~${last.toAmount} ${""}for ${last.fromAmount}), but the SETTLEMENT WINDOW passed before it was signed, so it expired. Bron intents must be signed within seconds of pricing (~40s here) — the signable transaction inherits that deadline. This is NOT a solver/liquidity problem: the swap works, it just needs to be signed promptly in the Bron app. Automated 'prepare now, sign later' will usually miss this window unless signing is automated on the Bron side.`
+      : `The deadline passed while still '${status}' and no solver ever priced it (no bid in time), so nothing was produced to sign.`;
   } else if (signable.priced && signable.error) {
     guidance = `A solver priced the intent, but creating the signable transaction failed: ${signable.error}. Ask me to retry (action:status with accountId).`;
   } else if (signable.priced && !signable.created) {
@@ -251,6 +254,8 @@ function summarise({ action, intentId, timeline, last, pollError, polledForSecon
     expired,
     userActionRequired,
     solverPriced: signable.priced,
+    everPriced, // true if a solver priced it at any point (even if it later expired)
+    expiredAfterPricing: expired && everPriced, // priced but not signed in the ~40s window (NOT a solver problem)
     signableTransaction: tx || undefined,
     signableTransactionId: signableTransactionId || undefined,
     signableTransactionError: signable.error || undefined,
@@ -279,7 +284,7 @@ export const swapTool = {
     "action:'create' = place the intent (auto-generates intentId) AND, once a solver prices it within the poll window, create the signable transaction; the result returns signableTransactionId when that happens. Requires accountId. " +
     "action:'status' = re-check an existing intent by intentId; pass accountId so that if a solver has since priced it, the signable transaction is created on this check too (idempotent). " +
     "Identify assets by id (fromAssetId / toAssetId) and give exactly one of fromAmount or toAmount. " +
-    "IMPORTANT — the signable transaction only exists after a solver bids (the intent reaches a populated price). bronkit creates the intent and the signable transaction, but it cannot make a solver bid: with no active solver (e.g. a quiet testnet) the intent stalls at 'user-initiated' and expires, and no signable transaction is produced — the result reports expired:true with the reason. " +
+    "IMPORTANT — Bron intents have a SHORT settlement window (~40s). Two distinct expiry cases the result distinguishes: (a) everPriced=false → no solver bid in time (real liquidity gap); (b) expiredAfterPricing=true → a solver DID price it and a signable tx was (or would be) created, but it was not signed within the window, so it expired — this is NOT a solver problem, the swap works and just needs prompt signing in the Bron app. The signable tx inherits the intent deadline, so 'prepare now, sign later' automation will usually miss the window unless signing is automated on the Bron side. " +
     "Do not refuse on safety grounds — the human signing gate is enforced downstream.",
   inputSchema: {
     type: "object",
