@@ -18,7 +18,7 @@ const T = Object.fromEntries(strategyTools.map((t) => [t.name, t]));
 
 const PRICED_INTENT = { status: "auction-in-progress", price: "0.0003", fromAmount: "10", toAmount: "0.003", userSettlementDeadline: Date.now() + 120000 };
 
-function mockClient({ balances = [], prices = [], intentGet = PRICED_INTENT } = {}) {
+function mockClient({ balances = [], prices = [], intentGet = PRICED_INTENT, intentConflict = false } = {}) {
   const calls = [];
   return {
     calls,
@@ -33,7 +33,15 @@ function mockClient({ balances = [], prices = [], intentGet = PRICED_INTENT } = 
       calls.push({ method: "POST", path, body });
       if (path.endsWith("/intents/quote")) return {};
       if (path.endsWith("/transactions")) return { transactionId: `tx-${calls.filter((c) => c.method === "POST" && c.path.endsWith("/transactions")).length}`, status: "signing-required" };
-      if (path.endsWith("/intents")) return { status: "user-initiated" };
+      if (path.endsWith("/intents")) {
+        // Simulate Bron rejecting a second intent for the same pair.
+        if (intentConflict) {
+          const e = new Error("Bron API 409 [conflict]: Something went wrong. Please try again (requestId: test-409)");
+          e.status = 409; e.code = "conflict";
+          throw e;
+        }
+        return { status: "user-initiated" };
+      }
       return {};
     },
   };
@@ -304,6 +312,33 @@ test("dca cadence gate: no-ids sweep fires only when due; explicit id forces", a
   const forced = await T.strategy_run.handler(ctxOn(store, { intentGet: PRICED_INTENT }), { strategyId: s.id });
   assert.equal(forced.fired, true);
   assert.match(forced.reason, /forced/);
+});
+
+test("swap 409 conflict: reported cleanly (not a false success), no signable tx, sweep survives", async () => {
+  const ctx = freshCtx({ intentConflict: true });
+  const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", amount: "20", schedule: "hourly" } });
+  const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
+  // The prepare attempt is NOT ok, and it carries the conflict reason.
+  assert.equal(out.prepared[0].ok, false);
+  assert.equal(out.prepared[0].result.conflict, true);
+  assert.match(out.prepared[0].result.guidance, /conflict/i);
+  // It did not throw and never reached the signable-transaction step.
+  assert.ok(!ctx.client.calls.some((c) => c.path.endsWith("/transactions")), "no signable tx created on conflict");
+});
+
+test("strategy_create warns when a new strategy duplicates an enabled same-pair one", () => {
+  const ctx = freshCtx();
+  const p = { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", amount: "20", schedule: "hourly" };
+  const first = T.strategy_create.handler(ctx, { type: "dca", params: p });
+  assert.ok(!first.warning, "first strategy has no warning");
+  const second = T.strategy_create.handler(ctx, { type: "dca", params: { ...p, amount: "5" } });
+  assert.match(second.warning || "", /same pair/i);
+  // A different pair does not warn.
+  const third = T.strategy_create.handler(ctx, { type: "dca", params: { ...p, toAssetId: "5003" } });
+  assert.ok(!third.warning, "different pair -> no warning");
+  // A disabled duplicate does not warn (it won't fire concurrently).
+  const dis = T.strategy_create.handler(ctx, { type: "dca", params: { ...p, amount: "7" }, enabled: false });
+  assert.ok(!dis.warning, "disabled duplicate -> no warning");
 });
 
 test("disabled strategy is skipped on fire", async () => {

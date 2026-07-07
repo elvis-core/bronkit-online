@@ -331,7 +331,30 @@ export const swapTool = {
       // Create returns the initial Intent (already carries a status) — seed the
       // poll with it. Then poll until a solver prices it and create the signable
       // transaction (step 3) so it appears in the Bron app to sign.
-      const created = await ctx.client.post(`${ws(ctx)}/intents`, body);
+      let created;
+      try {
+        created = await ctx.client.post(`${ws(ctx)}/intents`, body);
+      } catch (e) {
+        // 409 = Bron already has an ACTIVE intent for this account+asset pair. Our
+        // intentId is already unique per call, so a fresh id doesn't help — the
+        // existing intent has to clear (settle / expire — intents are short-lived —
+        // or be cancelled in the Bron app) before a new one is accepted. Report it
+        // cleanly instead of dying with a bare error.
+        if (e && (e.status === 409 || e.code === "conflict")) {
+          return {
+            action: "create",
+            intentId,
+            conflict: true,
+            status: null,
+            guidance:
+              "Swap not created — Bron returned a conflict (409): a swap for this account and asset pair is already pending. " +
+              "Intents are short-lived; wait for it to settle or expire, or cancel the pending swap in the Bron app, then retry. " +
+              "If this recurs, you likely have more than one strategy swapping the same pair — keep just one.",
+            conflictError: e.message,
+          };
+        }
+        throw e; // other failures propagate with the rich Bron API message
+      }
       const r = await pollAndMaybeSign(ctx, {
         intentId,
         accountId: a.accountId,

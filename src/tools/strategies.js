@@ -16,6 +16,24 @@ function need(ctx) {
   if (!ctx || !ctx.store || !ctx.userId) throw new Error("strategy tools require an authenticated user context");
 }
 
+// Signature of what a strategy actually TRADES (account + asset pair), per type —
+// used to warn when a new strategy duplicates an existing enabled one. Two strategies
+// with the same signature open conflicting same-pair intents (Bron 409s the second).
+function pairSignature(type, p = {}) {
+  const a = p.accountId || "";
+  switch (type) {
+    case "dca":
+    case "price_target":
+      return `${a}|${p.fromAssetId}>${p.toAssetId}`;
+    case "de_risk":
+      return `${a}|${p.assetId}>${p.toAssetId}`;
+    case "idle_to_stake":
+      return `${a}|${p.assetId}`;
+    default:
+      return `${a}|${type}`;
+  }
+}
+
 const PARAMS_HELP =
   "Type-specific params (validated): " +
   "dca = {accountId, fromAssetId, toAssetId, amount, schedule}; " +
@@ -46,10 +64,19 @@ const createTool = {
     need(ctx);
     const { trigger } = validateStrategy(a.type, a.params || {}); // throws on invalid params
     const name = (typeof a.name === "string" && a.name.trim().slice(0, 120)) || defaultStrategyName(a.type, a.params || {});
+    // Warn (don't block) if an enabled strategy already trades the same pair — two of
+    // them fire together and the second swap conflicts (Bron 409). Check before create.
+    const sig = pairSignature(a.type, a.params || {});
+    const dup = ctx.store.listStrategies(ctx.userId).find(
+      (x) => x.enabled && x.type === a.type && pairSignature(x.type, x.params) === sig
+    );
     const s = ctx.store.createStrategy(ctx.userId, { type: a.type, name, params: a.params, trigger });
     if (a.enabled === false) ctx.store.setStrategyEnabled(ctx.userId, s.id, false);
     return {
       ...ctx.store.getStrategy(ctx.userId, s.id),
+      ...(dup && a.enabled !== false
+        ? { warning: `You already have an enabled ${a.type} strategy trading this same pair ("${dup.name || dup.id}"). Running both will make one swap fail with a conflict — keep just one, or disable/delete the other. Tell the user.` }
+        : {}),
       // Not persisted — crisp, mobile-honest beat explanation the assistant must relay.
       // Structure the reply exactly: (1) confirm done, (2) how it runs, (3) next step.
       howItRuns:

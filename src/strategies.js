@@ -154,7 +154,15 @@ async function prepareSwap(ctx, { accountId, fromAssetId, toAssetId, fromAmount,
       description,
       maxWaitSeconds: 60,
     });
-    return { ok: !result.signableTransactionError, kind: "swap", description, result };
+    // A 409 conflict comes back as result.conflict (the swap tool no longer throws
+    // on it) — it is NOT a success even though no signable-tx error is present.
+    return {
+      ok: !result.conflict && !result.signableTransactionError,
+      kind: "swap",
+      description,
+      result,
+      ...(result.conflict ? { error: result.conflictError || "conflict", reason: result.guidance } : {}),
+    };
   } catch (e) {
     return { ok: false, kind: "swap", description, error: e.message };
   }
