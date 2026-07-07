@@ -41,17 +41,21 @@ The server never moves funds: withdrawal/staking tools only **create requests**;
 final approval happens in the Bron app (biometric + MPC), exactly as in local
 bronkit.
 
-## Automatic strategies
+## Strategies
 
-Users can automate recurring/conditional treasury actions — DCA, idle→stake,
-de-risk, price-target — set up and managed **entirely in chat** with the
-`strategy_*` tools. Firing is driven by ONE recurring Cowork task (the
-**metronome**) the user pastes in **once**: every hour it calls `strategy_run`
-(no ids), which evaluates all their enabled strategies against live prices and
-prepares any triggered transactions (each still signed in the Bron app). After
-that one-time setup, adding/pausing/deleting strategies in chat changes what fires
-on the next tick — no further Cowork visits. Full flow, tools, and types in
-**[DEPLOY.md §7](DEPLOY.md#7-automatic-strategies-the-metronome)**.
+Users can set up recurring/conditional treasury actions — DCA, idle→stake,
+de-risk, price-target — managed **entirely in chat** with the `strategy_*` tools.
+A strategy is stored config; it is **evaluated only when a live Claude session
+calls `strategy_run`** — the user asking "run my strategies", or a recurring task
+they set up in their own Claude (any device) that calls `strategy_run` (no ids) to
+check all enabled strategies. When a trigger is met, the strategy prepares a
+transaction that appears in the Bron app to sign.
+
+**Deliberate scope:** the operator hosts only this stateless connector — there is
+**no server-side clock**, so strategies run only while a user's Claude session is
+alive. A price trigger is **not** a 24/7 market watcher; true unattended execution
+is a Bron-platform capability, not this server's. Full flow, tools, types, and the
+honest limitation in **[DEPLOY.md §7](DEPLOY.md#7-strategies-how-they-run)**.
 
 ## Layout
 

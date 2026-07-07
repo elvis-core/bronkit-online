@@ -73,7 +73,7 @@ test("CRUD: create / list / update / enable / delete; per-user scoping", () => {
   assert.equal(T.strategy_list.handler(ctx).strategies.length, 0);
 });
 
-test("scheduledTaskId links the strategy to its Cowork task (for pause/delete)", () => {
+test("scheduledTaskId optionally records the user's recurring task id (round-trips + survives reload)", () => {
   const ctx = freshCtx();
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
   assert.equal(s.scheduledTaskId, null);
@@ -251,29 +251,57 @@ test("strategy name travels into the fired tx rationale (signing surface)", asyn
   assert.match(txCall.body.description, /Morning ETH buy/);
 });
 
-test("strategy_create result explains the metronome beat (howItRuns)", () => {
+test("strategy_create result explains the beat honestly (howItRuns): not self-running, runs while alive, not 24/7", () => {
   const ctx = freshCtx();
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "0 9 * * *" } });
   assert.ok(typeof s.howItRuns === "string");
   assert.match(s.howItRuns, /NOT self-running/);
-  assert.match(s.howItRuns, /metronome/i);
-  assert.match(s.howItRuns, /scheduler_setup_text/);
+  assert.match(s.howItRuns, /live Claude session calls strategy_run/);
+  assert.match(s.howItRuns, /while a Claude session is alive/i);
+  assert.match(s.howItRuns, /24\/7/); // states the honest limit
+  // Surface-neutral: no forced Cowork/desktop flow baked into the guidance.
+  assert.doesNotMatch(s.howItRuns, /cowork|\/schedule/i);
   // Ephemeral guidance — not persisted on the stored strategy.
   assert.equal(ctx.store.getStrategy(ctx.userId, s.id).howItRuns, undefined);
 });
 
-test("scheduler_setup_text: returns a self-contained, paste-ready metronome prompt", () => {
+test("scheduler_setup_text: surface-neutral, self-contained prompt + honest 'runs while alive' limit", () => {
   const ctx = freshCtx();
   const out = T.scheduler_setup_text.handler(ctx);
   assert.ok(typeof out.pasteText === "string" && out.pasteText.length > 0);
   // Self-contained: names the tool + connector, the no-ids semantics, and the sign reminder.
   assert.match(out.pasteText, /strategy_run/);
   assert.match(out.pasteText, /bronkit/i);
-  assert.match(out.pasteText, /hour/i);
   assert.match(out.pasteText, /no strategy ids/i);
   assert.match(out.pasteText, /Bron app/);
-  // Presents the two-step Cowork install (/schedule → paste → confirm).
-  assert.ok(Array.isArray(out.installInCowork) && out.installInCowork.some((s) => /schedule/i.test(s)));
+  // Surface-neutral: does NOT hardcode a specific Claude surface (no Cowork/ /schedule).
+  assert.doesNotMatch(JSON.stringify(out), /cowork|\/schedule/i);
+  // States the honest limitation and offers guidance instead of a forced flow.
+  assert.match(out.honestLimit, /only runs while/i);
+  assert.match(out.honestLimit, /24\/7/);
+  assert.ok(typeof out.howToUse === "string");
+});
+
+test("dca cadence gate: no-ids sweep fires only when due; explicit id forces", async () => {
+  const store = new FileStore(tmpPath());
+  const params = { accountId: "acc1", fromAssetId: "USDC", toAssetId: "ETH", amount: "10", schedule: "hourly" };
+  const s = T.strategy_create.handler(ctxOn(store, {}), { type: "dca", params });
+
+  // Sweep 1 (never fired) → due → fires.
+  let out = await T.strategy_run.handler(ctxOn(store, { intentGet: PRICED_INTENT }), {});
+  assert.equal(out.fired, 1);
+
+  // Sweep 2 immediately after → NOT due (hourly cadence) → no duplicate.
+  const ctx2 = ctxOn(store, { intentGet: PRICED_INTENT });
+  out = await T.strategy_run.handler(ctx2, {});
+  assert.equal(out.fired, 0);
+  assert.match(out.results[0].reason, /not due/);
+  assert.ok(!ctx2.client.calls.some((c) => c.path.endsWith("/intents")), "no intent placed");
+
+  // Explicit id ("run it now") → forced → fires despite cadence.
+  const forced = await T.strategy_run.handler(ctxOn(store, { intentGet: PRICED_INTENT }), { strategyId: s.id });
+  assert.equal(forced.fired, true);
+  assert.match(forced.reason, /forced/);
 });
 
 test("disabled strategy is skipped on fire", async () => {

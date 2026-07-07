@@ -1,8 +1,9 @@
 // Conversational management + firing for scheduled strategies. CRUD tools let
-// Claude set/manage strategies in chat; strategy_fire is what the Cowork
-// scheduled task (the clock) calls when a strategy is due — it re-reads the live
-// condition and prepares the transaction(s). Strategies are scoped to the
-// caller's user identity (ctx.userId), persisted in ctx.store.
+// Claude sets/manages strategies in chat; strategy_run is what a live session (the
+// user, or a recurring task they set up in their own Claude) calls to evaluate them
+// — it re-reads the live condition and prepares the transaction(s). There is no
+// server-side clock. Strategies are scoped to the caller's user identity
+// (ctx.userId), persisted in ctx.store.
 
 import { STRATEGY_TYPES, validateStrategy, fireStrategy, defaultStrategyName } from "../strategies.js";
 
@@ -26,9 +27,9 @@ const createTool = {
   name: "strategy_create",
   title: "Create a strategy",
   description:
-    "Create a standing strategy that PREPARES transactions automatically when its trigger fires (the hourly Cowork \"metronome\" task is the clock — see scheduler_setup_text). Standing authorisation to prepare only — signing always happens on the phone. Types: dca (time-scheduled swap), idle_to_stake (stake idle balance over a threshold), de_risk (swap to a stable when a price crosses down to/below a level), price_target (swap when a price crosses a target, direction above|below). " +
+    "Create a standing strategy that PREPARES a transaction when its trigger is met AT THE MOMENT IT IS EVALUATED. Standing authorisation to prepare only — signing always happens in the Bron app. Types: dca (time-scheduled swap), idle_to_stake (stake idle balance over a threshold), de_risk (swap to a stable when a price crosses down to/below a level), price_target (swap when a price crosses a target, direction above|below). " +
     PARAMS_HELP +
-    " IMPORTANT: after creating, ALWAYS tell the user how firing works — a stored strategy does NOT run by itself; the hourly Cowork metronome task is what evaluates it (the create result's howItRuns field explains; relay it).",
+    " IMPORTANT: after creating, ALWAYS relay the create result's howItRuns field — a stored strategy does NOT run on its own; it is only evaluated when a live Claude session calls strategy_run (the user asking 'run my strategies', or a recurring task they set up in Claude). Be honest that it only runs while a session is alive, and that price triggers do NOT watch the market 24/7.",
   inputSchema: {
     type: "object",
     properties: {
@@ -49,9 +50,9 @@ const createTool = {
     if (a.enabled === false) ctx.store.setStrategyEnabled(ctx.userId, s.id, false);
     return {
       ...ctx.store.getStrategy(ctx.userId, s.id),
-      // Not persisted — the beat explanation the assistant must relay to the user.
+      // Not persisted — the honest beat explanation the assistant must relay verbatim.
       howItRuns:
-        "Stored, but NOT self-running: nothing on this server wakes up on its own. The strategy is evaluated only when the hourly Cowork metronome task calls strategy_run. If the user has NOT yet created the metronome, tell them now and set it up: call scheduler_setup_text and hand them its pasteText with the steps (open Cowork -> type /schedule -> paste -> confirm) — one-time setup that then drives ALL strategies. If the metronome already exists, say this strategy will be picked up automatically on its next hourly run.",
+        "Stored, but NOT self-running. Nothing on this server wakes up on its own — the strategy is evaluated ONLY when a live Claude session calls strategy_run. Two ways that happens: (1) the user asks 'run my strategies' anytime; (2) the user sets up a recurring task in Claude (on whichever device they use) that calls strategy_run — which then evaluates ALL their enabled strategies each run. Tell the user this plainly, and tell them the honest limit: it runs only WHILE a Claude session is alive, so a price trigger like 'sell if it drops below X' does NOT watch the market 24/7 — if no session runs during the drop, it won't fire. For a hands-off recurring check, offer scheduler_setup_text (a ready-to-paste prompt for Claude's scheduler). Do not promise unattended 24/7 firing.",
     };
   },
 };
@@ -71,7 +72,7 @@ const listTool = {
 const updateTool = {
   name: "strategy_update",
   title: "Update a strategy",
-  description: "Update a strategy's name, params, enabled flag, and/or scheduledTaskId. Provided params are merged with the existing ones and re-validated against the type. The skill records the Cowork task id here via scheduledTaskId so pause/delete can update both halves. " + PARAMS_HELP,
+  description: "Update a strategy's name, params, enabled flag, and/or scheduledTaskId. Provided params are merged with the existing ones and re-validated against the type. scheduledTaskId optionally records the id of a recurring Claude task the user set up to evaluate strategies, if they want to track it. " + PARAMS_HELP,
   inputSchema: {
     type: "object",
     properties: {
@@ -79,7 +80,7 @@ const updateTool = {
       name: { type: "string", description: "New self-explanatory human name" },
       params: { type: "object", description: PARAMS_HELP, additionalProperties: true },
       enabled: { type: "boolean" },
-      scheduledTaskId: { type: "string", description: "Id of the Cowork scheduled task that fires this strategy (set by the orchestration skill after create_scheduled_task)." },
+      scheduledTaskId: { type: "string", description: "Optional id of a recurring Claude task the user set up to call strategy_run, if they want to track which one drives their strategies." },
     },
     required: ["strategyId"],
     additionalProperties: false,
@@ -143,12 +144,13 @@ const setEnabledTool = {
   },
 };
 
-// The ONE recurring Cowork task ("metronome") the user pastes in once. Each hourly
-// run calls strategy_run with no ids → every enabled strategy is evaluated against
-// live data. Self-contained: a scheduled run starts fresh with no chat memory, so it
-// names the connector, the call, the reporting, and the sign reminder explicitly.
+// Optional ready-to-paste prompt for whatever recurring-task feature the user's
+// Claude offers (Desktop scheduled task, Anthropic-cloud task — surface-neutral).
+// One run calls strategy_run with no ids → every enabled strategy is evaluated.
+// Self-contained: a scheduled run starts fresh with no chat memory, so it names the
+// connector, the call, the reporting, and the sign reminder explicitly.
 const SCHEDULER_PASTE_TEXT =
-`Every hour, using the Bron (bronkit) connector, call strategy_run with no strategy ids — this evaluates all of my enabled treasury strategies against live prices and balances.
+`Using the Bron (bronkit) connector, call strategy_run with no strategy ids — this evaluates all of my enabled treasury strategies against live prices and balances.
 
 Then tell me in plain language: which strategies you checked, the live values you saw (prices and balances), and any transactions you prepared and why — include each strategy's rationale.
 
@@ -156,23 +158,19 @@ If you prepared any transactions, remind me they are waiting in the Bron app for
 
 const schedulerSetupTextTool = {
   name: "scheduler_setup_text",
-  title: "Get the Cowork metronome paste text",
+  title: "Get a paste-ready recurring-check prompt",
   description:
-    "Return the paste-ready prompt for the ONE recurring Cowork scheduled task (the \"metronome\") that drives every strategy. Hand its pasteText to the user: they open Cowork, type /schedule, paste it, and confirm — that hourly task then calls strategy_run (no ids) to evaluate all enabled strategies. This is a ONE-TIME setup; afterwards the user adds/pauses/deletes strategies in chat and the metronome picks up the change on its next run — no more Cowork visits. You (an MCP connector) CANNOT create the Cowork task yourself; never claim you did. Read-only: returns text, creates nothing.",
+    "Return an OPTIONAL ready-to-paste prompt the user can drop into whatever recurring/scheduled-task feature their Claude offers (Desktop app or Anthropic cloud — whichever they use). Each run calls strategy_run (no ids) to evaluate all enabled strategies. Hand the user its pasteText and let them set it up in their own scheduler — do NOT prescribe a specific surface, and never claim you (an MCP connector) created the schedule yourself. Be honest: whatever they use, it only runs while that Claude session/app is active — it is NOT a 24/7 market watcher. Read-only: returns text, creates nothing.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false },
   annotations: READ,
   handler: (ctx) => {
     need(ctx);
     return {
       pasteText: SCHEDULER_PASTE_TEXT,
-      cadence: "hourly",
-      installInCowork: [
-        "Open Cowork.",
-        "Type /schedule.",
-        "Paste the pasteText exactly as-is.",
-        "Confirm to create the recurring metronome task.",
-      ],
-      note: "One-time setup. After this, add / pause / delete strategies in chat with the strategy_* tools — the metronome evaluates whatever is enabled on its next hourly run, with zero further Cowork visits.",
+      howToUse:
+        "Optional. Put this prompt into any recurring-task feature your Claude offers (e.g. a scheduled task on the device you use). Pick your own cadence (hourly is typical). It evaluates whatever strategies are enabled at that moment — add/pause/delete strategies in chat and the next run reflects it.",
+      honestLimit:
+        "It only runs while that Claude session/app is alive. There is no server-side 24/7 watcher, so a price trigger will NOT fire during a market move if no session runs then. For guaranteed unattended execution, that has to live in the Bron platform, not here.",
     };
   },
 };
@@ -212,7 +210,10 @@ const runTool = {
         continue;
       }
       try {
-        const outcome = await fireStrategy(ctx, s); // re-reads live condition + prepares
+        // Explicit ids = the user asked for THIS strategy now (bypasses the dca
+        // cadence gate). The no-ids sweep never forces — same rule as the server clock.
+        const force = !!(a.strategyId || (a.strategyIds && a.strategyIds.length));
+        const outcome = await fireStrategy(ctx, s, { force }); // re-reads live condition + prepares
         if (outcome.fired) ctx.store.touchStrategyFired(ctx.userId, id);
         results.push({ strategyId: id, type: s.type, ...outcome });
       } catch (e) {

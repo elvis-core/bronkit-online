@@ -167,7 +167,7 @@ async function runUser(base, mockBase, jwk, wsId, expectKid, label) {
   ok(Array.isArray(list.body.result?.tools) && list.body.result.tools.length === 30, `tools/list → 30 tools (got ${list.body.result?.tools?.length})`);
   ok(list.body.result.tools.some((t) => t.name === "bron_tx_swap"), "bron_tx_swap is present");
   ok(list.body.result.tools.some((t) => t.name === "strategy_run"), "strategy tools are present");
-  ok(list.body.result.tools.some((t) => t.name === "scheduler_setup_text"), "scheduler_setup_text (metronome) is present");
+  ok(list.body.result.tools.some((t) => t.name === "scheduler_setup_text"), "scheduler_setup_text is present");
 
   bronCalls = []; // isolate this user's downstream Bron calls
   const call = await rpc(base, tok.access_token, 3, "tools/call", { name: "bron_accounts_overview", arguments: {} });

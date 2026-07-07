@@ -115,7 +115,7 @@ export class FileStore {
       lastFiredAt: null,
       lastObservedPrice: null, // price triggers: price seen at the previous run (crossing detection)
       armed: true, // price triggers: false after firing until it re-crosses / is re-enabled
-      scheduledTaskId: null, // the Cowork task that fires this strategy (set by the skill)
+      scheduledTaskId: null, // optional id of a recurring Claude task the user set up to evaluate strategies
       createdAt: new Date().toISOString(),
     };
     this.state.strategies[id] = s;

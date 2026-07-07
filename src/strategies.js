@@ -226,18 +226,35 @@ async function evaluatePriceTrigger(ctx, s, { assetId, target, isRightSide, prep
 
 // ---- firing ---------------------------------------------------------------
 
+// dca cadence: how long between fires for a given schedule value. Keywords are
+// the supported contract; anything else (legacy cron strings) falls back to
+// hourly so a coarse clock can never over-fire a daily plan into an hourly one.
+const CADENCE_MS = { hourly: 3_600_000, daily: 86_400_000, weekly: 604_800_000 };
+function cadenceMs(schedule) {
+  return CADENCE_MS[String(schedule || "").toLowerCase()] || CADENCE_MS.hourly;
+}
+
 // Evaluate ONE strategy against live data and prepare transaction(s) if tripped.
 // Returns { fired, reason, conditionValue, prepared:[...] }. Each prepared entry
 // is independent — a failure in one does not abort the others, and none assumes a
-// prior one settled.
-export async function fireStrategy(ctx, s) {
+// prior one settled. opts.force (an explicit "run THIS strategy now") bypasses
+// the dca cadence gate only — condition/crossing triggers always decide themselves.
+export async function fireStrategy(ctx, s, opts = {}) {
   const p = s.params || {};
   switch (s.type) {
     case "dca": {
-      // Time trigger: the scheduler (Cowork clock) decides WHEN; we prepare the swap.
+      // Time trigger. The clock ticks more often than most schedules, so gate on
+      // the strategy's own cadence: fire only when schedule-time has elapsed
+      // since lastFiredAt (2% slack absorbs clock jitter). force = user said
+      // "run it now" (explicit id) — the sweeping no-ids/scheduler path never forces.
+      const elapsed = s.lastFiredAt ? Date.now() - Date.parse(s.lastFiredAt) : Infinity;
+      const due = elapsed >= cadenceMs(p.schedule) * 0.98;
+      if (!due && !opts.force) {
+        return { fired: false, reason: `not due: schedule '${p.schedule}', last fired ${s.lastFiredAt}`, conditionValue: null, prepared: [] };
+      }
       const description = rationale(s, `scheduled DCA: swap ${p.amount} of ${p.fromAssetId} -> ${p.toAssetId}`);
       const prepared = [await prepareSwap(ctx, { accountId: p.accountId, fromAssetId: p.fromAssetId, toAssetId: p.toAssetId, fromAmount: String(p.amount), description })];
-      return { fired: true, reason: "scheduled", conditionValue: null, prepared };
+      return { fired: true, reason: due ? `due (schedule '${p.schedule}')` : "forced (explicit run)", conditionValue: null, prepared };
     }
     case "idle_to_stake": {
       const idle = await readIdle(ctx, p.accountId, p.assetId); // live

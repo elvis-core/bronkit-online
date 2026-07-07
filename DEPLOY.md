@@ -124,53 +124,38 @@ docker run ... -v bronkit-data:/app/data -e STORE_PATH=/app/data/store.json bron
 
 ---
 
-## 7. Automatic strategies (the metronome)
+## 7. Strategies — how they run
 
-A **strategy** is stored config the user sets up **in chat**. When its trigger
-fires, the server PREPARES transaction(s); each lands in the Bron app to sign.
-Standing authorisation to **prepare** — never to sign (signing stays on the phone,
-MPC).
+A **strategy** is stored config the user sets up **in chat**. When evaluated, the
+server re-reads the **live** balance/price and, if the trigger is met at that
+moment, PREPARES a transaction; it lands in the Bron app to sign. Standing
+authorisation to **prepare** — never to sign (signing stays on the phone, MPC).
 
-Two separate parts:
+**There is no server-side clock. This connector is stateless — it does zero
+background work.** A strategy is evaluated **only when a live Claude session calls
+`strategy_run`**:
 
-- **Strategies** — created and managed entirely in chat with
-  `strategy_create / list / update / set_enabled / delete`, plus **`strategy_run`**,
-  which re-reads the **live** balance/price, decides, and prepares via
-  `bron_tx_swap` / `bron_tx_staking`. It never acts on stored numbers. Strategies
-  live in the central store, so any Claude session (or the metronome) sees the same
-  set.
-- **The metronome** — ONE recurring Cowork scheduled task the user sets up **once**.
-  Each hour it calls `strategy_run` with **no ids**, evaluating **every enabled
-  strategy** in one pass. Because it always evaluates whatever is enabled *right
-  now*, the store is the single source of truth.
+- Created/managed in chat with `strategy_create / list / update / set_enabled /
+  delete`, plus **`strategy_run`**, which re-reads live data, decides, and prepares
+  via `bron_tx_swap` / `bron_tx_staking` — never acting on stored numbers.
+- `strategy_run` with **no ids** evaluates **every enabled strategy** in one pass,
+  so the store is the single source of truth — add/pause/delete in chat and the
+  next run reflects it.
+- It runs two ways: (1) the user asks *"run my strategies"*; (2) the user sets up a
+  **recurring task in their own Claude** (whichever device/feature they use) that
+  calls `strategy_run` (no ids). `scheduler_setup_text` returns an **optional**
+  ready-to-paste prompt for that — surface-neutral; the operator hosts nothing and
+  Claude never claims it created a schedule. Guidance for this lives in the committed
+  skill [`.claude/skills/bronkit-strategies`](.claude/skills/bronkit-strategies/SKILL.md)
+  and the MCP `instructions` (so it reaches connector users without the repo skill).
 
-**One-time setup.** An MCP connector cannot create a Cowork task, so Claude hands
-the user the paste line instead of scheduling anything itself:
-
-1. In chat: *"activate / start my strategies automatically."* Claude calls
-   `strategy_list` (shows what's enabled) then **`scheduler_setup_text`** and
-   presents its `pasteText`.
-2. The user: **open Cowork → type `/schedule` → paste it → confirm.** That creates
-   the hourly metronome. The pasted prompt is self-contained — each run calls
-   `strategy_run` (no ids) on the bronkit connector and reports what it checked,
-   the live values, and any prepared txs (with rationale + a reminder to sign in
-   the Bron app).
-
-**After that, zero Cowork visits.** Adding, pausing (`strategy_set_enabled`), or
-deleting a strategy in chat changes what the metronome prepares on its next tick —
-the schedule never changes, only the store does. This is driven both by the
-committed skill [`.claude/skills/bronkit-strategies`](.claude/skills/bronkit-strategies/SKILL.md)
-and by the same guidance embedded in the MCP `instructions` (so it reaches
-connector users who don't have the repo skill loaded).
-
-On each tick, `strategy_run` re-checks the live condition per strategy and, if
-tripped, prepares the transaction(s) — each appears in the Bron app to sign with a
-rationale (which strategy, the trigger value) in the description. Strategies are
-evaluated independently; one failing does not abort the rest.
+Each evaluation prepares transactions independently — one failing does not abort the
+rest — and each carries a rationale (the strategy's name, why, the trigger value) in
+its description.
 
 **Strategy types** (existing primitives only — no derivatives/lending):
-- `dca` — time schedule → swap a fixed amount A→B. params: `accountId,
-  fromAssetId, toAssetId, amount, schedule`.
+- `dca` — swap a fixed amount A→B; `schedule` (hourly/daily/weekly) gates how often
+  it re-prepares. params: `accountId, fromAssetId, toAssetId, amount, schedule`.
 - `idle_to_stake` — when live idle balance exceeds a threshold, stake the excess.
   params: `accountId, assetId, threshold`.
 - `de_risk` — when a live price crosses down to/below a level, swap to a stable.
@@ -181,12 +166,15 @@ evaluated independently; one failing does not abort the rest.
 
 Price triggers (`de_risk`, `price_target`) fire **once per cross** — a strategy
 created already past its target does not fire until price actually crosses, and it
-won't duplicate on repeat ticks.
+won't duplicate on repeat evaluations.
 
-**Constraints (honest):** the metronome must have the bronkit connector available
-at run time — verify with one real run. Swaps have a short signing window, so a
-prepared swap still needs the user to sign promptly on the phone or it re-fires next
-cycle.
+**The honest limitation (state it to users).** Because a strategy only runs while a
+Claude session is alive, a price trigger like "sell if it drops below X" is **NOT a
+24/7 market watcher** — if no session runs during the move, it does not fire. Swaps
+also have a short signing window, so a prepared swap needs prompt signing in the
+Bron app or it re-fires next run. **True unattended 24/7 execution is out of scope
+for this connector** — it belongs in the Bron platform (e.g. a dedicated automation
+vault + Bron's Hot Wallet Signer), not here.
 
 ---
 
