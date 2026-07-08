@@ -56,12 +56,6 @@ const POLL_INTERVAL_MS = Number(process.env.BRONKIT_POLL_INTERVAL_MS ?? 3000);
 const DEFAULT_MAX_WAIT_S = 25;
 const MAX_MAX_WAIT_S = 90;
 
-// A 409 on intent-create means a same-pair intent is still active. Bron has no
-// cancel-intent endpoint, but intents are short-lived (~40s), so we auto-retry with
-// a fresh unique id, waiting the blocker out, instead of erroring at the user.
-const CONFLICT_RETRIES = Number(process.env.BRONKIT_CONFLICT_RETRIES ?? 4);
-const CONFLICT_RETRY_MS = Number(process.env.BRONKIT_CONFLICT_RETRY_MS ?? 10000);
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowIso = () => new Date().toISOString();
 
@@ -338,45 +332,30 @@ export const swapTool = {
       if (a.fromAmount != null && a.fromAmount !== "") amountFields.fromAmount = a.fromAmount;
       if (a.toAmount != null && a.toAmount !== "") amountFields.toAmount = a.toAmount;
 
-      // Create returns the initial Intent (already carries a status) — seed the
-      // poll with it. Then poll until a solver prices it and create the signable
-      // transaction (step 3) so it appears in the Bron app to sign.
-      //
-      // On a 409 (a same-pair intent is still active) auto-retry with a FRESH unique
-      // id, waiting out the short-lived blocker — Bron has no cancel-intent endpoint,
-      // so this is the working equivalent of "clear the obsolete one and create new".
-      let intentId = a.intentId || randomUUID();
+      // Create the intent (POST /intents), then poll until a solver prices it and
+      // create the signable transaction (step 3) so it appears in the Bron app to sign.
+      // Do NOT auto-retry a 409: diagnosis showed intent-create currently 409s
+      // workspace-wide (every pair/account) while reads/quote/withdrawals work — so a
+      // 409 is a Bron-side condition on the intent-create endpoint (possibly a rate
+      // limit/cooldown), NOT a fixable same-pair conflict. Retrying only hammers it.
+      const intentId = a.intentId || randomUUID();
+      const body = { accountId: a.accountId, intentId, fromAssetId: a.fromAssetId, toAssetId: a.toAssetId, ...amountFields };
       let created;
-      let lastConflict;
-      for (let attempt = 0; attempt <= CONFLICT_RETRIES; attempt++) {
-        const body = { accountId: a.accountId, intentId, fromAssetId: a.fromAssetId, toAssetId: a.toAssetId, ...amountFields };
-        try {
-          created = await ctx.client.post(`${ws(ctx)}/intents`, body);
-          lastConflict = null;
-          break;
-        } catch (e) {
-          const isConflict = e && (e.status === 409 || e.code === "conflict");
-          if (!isConflict) throw e; // other failures propagate with the rich message
-          lastConflict = e;
-          if (attempt < CONFLICT_RETRIES) {
-            if (CONFLICT_RETRY_MS > 0) await sleep(CONFLICT_RETRY_MS); // let the blocker expire
-            intentId = a.intentId ? intentId : randomUUID(); // fresh id unless caller pinned one
-          }
+      try {
+        created = await ctx.client.post(`${ws(ctx)}/intents`, body);
+      } catch (e) {
+        if (e && (e.status === 409 || e.code === "conflict")) {
+          return {
+            action: "create",
+            intentId,
+            conflict: true,
+            status: null,
+            guidance:
+              "Intent NOT created — Bron returned 409 conflict. This request is well-formed (matches Bron's schema; quote on the same pair returns 200) and worked before, so this is a Bron-SIDE block on the intent-create endpoint — observed workspace-wide (every pair and account) while reads, quotes and withdrawals succeed. Likely a rate-limit/cooldown or a workspace intents-service issue. Do NOT keep retrying (it can worsen a cooldown). Give Bron support this requestId to resolve it.",
+            conflictError: e.message,
+          };
         }
-      }
-      if (lastConflict) {
-        // Still blocked after waiting out the window — surface it clearly (rare).
-        return {
-          action: "create",
-          intentId,
-          conflict: true,
-          status: null,
-          guidance:
-            "Swap not created — a same-pair swap for this account is still pending after auto-retry. " +
-            "Bron has no cancel-intent API; the pending one is short-lived, so try again in a minute. " +
-            "If it persists, cancel the pending swap in the Bron app.",
-          conflictError: lastConflict.message,
-        };
+        throw e; // other failures propagate with the rich Bron API message
       }
       const r = await pollAndMaybeSign(ctx, {
         intentId,

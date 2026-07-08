@@ -330,10 +330,10 @@ test("swap 409 conflict: reported cleanly (not a false success), no signable tx,
   const ctx = freshCtx({ intentConflict: true });
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", amount: "20", schedule: "hourly" } });
   const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
-  // After auto-retry fails to clear, the prepare attempt is NOT ok and reports it.
+  // A 409 makes the prepare NOT ok and reports the honest Bron-side cause.
   assert.equal(out.prepared[0].ok, false);
   assert.equal(out.prepared[0].result.conflict, true);
-  assert.match(out.prepared[0].result.guidance, /pending|auto-retry/i);
+  assert.match(out.prepared[0].result.guidance, /Bron-SIDE|workspace-wide|409 conflict/i);
   // It did not throw and never reached the signable-transaction step.
   assert.ok(!ctx.client.calls.some((c) => c.path.endsWith("/transactions")), "no signable tx created on conflict");
 });

@@ -249,30 +249,28 @@ test("expired and NEVER priced: honestly reports no bid (everPriced false)", asy
   assert.match(out.guidance, /no solver|no bid/i);
 });
 
-test("409 auto-retry: a transient same-pair conflict clears on retry with a fresh id (no error surfaced)", async () => {
-  process.env.BRONKIT_CONFLICT_RETRY_MS = "0"; // no real waiting in the test
-  const { swapTool: fresh } = await import("../src/tools/intents.js?conflict");
-  // First POST /intents 409s, the second succeeds (blocker expired). Fresh id each try.
-  let n = 0;
-  const seenIntentIds = [];
+test("409 on create: fails fast with an honest Bron-side message, does NOT retry-hammer", async () => {
+  // Every POST /intents 409s (the real-world workspace-wide condition). We must NOT
+  // retry — one attempt, then report it honestly.
+  let intentPosts = 0;
   const ctx = {
     workspaceId: "ws-test", calls: [],
     client: {
-      async post(path, body) {
+      async post(path) {
         if (path.endsWith("/intents") && !path.endsWith("/quote")) {
-          seenIntentIds.push(body.intentId);
-          if (n++ === 0) { const e = new Error("Bron API 409 [conflict]"); e.status = 409; e.code = "conflict"; throw e; }
-          return { status: "user-initiated" };
+          intentPosts++;
+          const e = new Error("Bron API 409[conflict]: Something went wrong (requestId: r-1)");
+          e.status = 409; e.code = "conflict";
+          throw e;
         }
-        if (path.endsWith("/transactions")) return { transactionId: "tx-1", status: "signing-required" };
         return {};
       },
-      async get() { return { status: "auction-in-progress", price: "1800", fromAmount: "20", toAmount: "0.011", userSettlementDeadline: Date.now() + 60000 }; },
+      async get() { return {}; },
     },
   };
-  const out = await fresh.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "5002", toAssetId: "2", fromAmount: "20", maxWaitSeconds: 1 });
-  assert.ok(!out.conflict, "conflict was auto-resolved, not surfaced");
-  assert.equal(out.signableTransactionId, "tx-1", "swap proceeded to a signable tx after retry");
-  assert.equal(seenIntentIds.length, 2, "retried once");
-  assert.notEqual(seenIntentIds[0], seenIntentIds[1], "used a FRESH unique intentId on retry");
+  const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "5002", toAssetId: "2", fromAmount: "20", maxWaitSeconds: 1 });
+  assert.equal(out.conflict, true);
+  assert.equal(intentPosts, 1, "exactly one attempt — no retry-hammering");
+  assert.match(out.guidance, /Bron-SIDE|workspace-wide/);
+  assert.doesNotMatch(out.guidance, /same-pair|pending/i); // no fabricated cause
 });
