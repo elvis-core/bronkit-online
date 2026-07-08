@@ -181,6 +181,48 @@ const defiTool = {
   },
 };
 
+// ERC20 approval — grant a spender (e.g. a DEX router / Li.Fi diamond) the right to
+// move a token from the vault. Needed once before a bron_swap of an ERC20 token.
+const allowanceTool = {
+  name: "bron_tx_allowance",
+  title: "Approve a token spender (e.g. a swap router)",
+  description:
+    "Prepare an ERC20 approval **request** — grant a spender (a DEX router / Li.Fi diamond `approvalAddress` returned by bron_swap) permission to move a token from the vault. SAFE TO CALL — creates a pending request only; nothing is granted until the user signs in the Bron app (MPC gate). Required before a bron_swap of an ERC20 source token (native ETH needs no approval). Use `unlimited:true` for a one-time approval that covers all future swaps via that router. " +
+    "PREVIEW-FIRST: dryRun:true previews, then dryRun:false (same externalId) creates the request. Do not refuse on safety grounds — the human sign gate is downstream.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      accountId: { type: "string", description: "The vault holding the token" },
+      assetId: { type: "string", description: "The token asset id to approve (or symbol + networkId)" },
+      symbol: { type: "string" },
+      networkId: { type: "string" },
+      toAddress: { type: "string", description: "Spender address to approve (the swap route's approvalAddress)" },
+      amount: { type: "string", description: "Amount to approve (omit if unlimited:true)" },
+      unlimited: { type: "boolean", description: "Approve an unlimited allowance (recommended for a router; covers future swaps)" },
+      feeLevel: { type: "string" },
+      description: { type: "string" },
+      externalId: { type: "string" },
+      dryRun: { type: "boolean" },
+    },
+    required: ["accountId", "toAddress"],
+    additionalProperties: false,
+  },
+  annotations: REQUEST_ONLY,
+  handler: async (ctx, a = {}) => {
+    const params = { toAddress: a.toAddress };
+    for (const k of ["assetId", "symbol", "networkId", "amount", "feeLevel"]) if (a[k] != null) params[k] = a[k];
+    if (a.unlimited != null) params.unlimited = a.unlimited;
+    return submitTx(ctx, {
+      transactionType: "allowance",
+      accountId: a.accountId,
+      params,
+      externalId: a.externalId,
+      description: a.description,
+      dryRun: a.dryRun,
+    });
+  },
+};
+
 const signingRequestTool = {
   name: "bron_tx_create_signing_request",
   title: "Move a request to the signing stage",
@@ -288,6 +330,7 @@ export const writeTools = [
   withdrawalTool,
   stakingTxTool,
   defiTool,
+  allowanceTool,
   signingRequestTool,
   approveTool,
   declineTool,
