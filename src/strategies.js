@@ -173,6 +173,40 @@ async function prepareSwap(ctx, { accountId, fromAssetId, toAssetId, fromAmount,
   }
 }
 
+// Resume a strategy's existing swap intent instead of creating a duplicate (Bron
+// allows one active intent per account+pair, so a duplicate 409s). If the previous
+// intent is priced, this completes it into a signable tx ("we have the intent + a
+// price — create the TX"); if it's still live, we wait rather than duplicate; only if
+// it's gone/expired do we create a fresh one (and persist its id for next time).
+async function prepareOrResumeSwap(ctx, s, swapArgs) {
+  if (s.lastIntentId) {
+    try {
+      const st = await swapTool.handler(ctx, {
+        action: "status",
+        intentId: s.lastIntentId,
+        accountId: swapArgs.accountId,
+        description: swapArgs.description,
+        maxWaitSeconds: 15,
+      });
+      if (st.signableTransactionId) {
+        // Previous intent got priced — completed into a signable tx now, no duplicate.
+        return { ok: true, kind: "swap", description: swapArgs.description, result: st, resumed: true };
+      }
+      if (!st.terminal && !st.expired && !st.notFound) {
+        // Still live (in the auction, not yet priced) — don't stack a conflicting one.
+        return { ok: false, kind: "swap", description: swapArgs.description, result: st, reason: "previous swap for this pair is still in progress — not creating a duplicate" };
+      }
+      // expired / terminal / not-found → fall through and create a fresh intent.
+    } catch {
+      /* status check failed — fall through to create a new intent */
+    }
+  }
+  const prep = await prepareSwap(ctx, swapArgs);
+  const newId = prep.result && prep.result.intentId;
+  if (newId) ctx.store.updateStrategy(ctx.userId, s.id, { lastIntentId: newId });
+  return prep;
+}
+
 async function prepareStake(ctx, { accountId, assetId, amount, description }) {
   try {
     const result = await stakingTxTool.handler(ctx, {
@@ -266,7 +300,7 @@ export async function fireStrategy(ctx, s, opts = {}) {
         return { fired: false, reason: `not due: schedule '${p.schedule}', last fired ${s.lastFiredAt}`, conditionValue: null, prepared: [] };
       }
       const description = rationale(s, `scheduled DCA: swap ${p.amount} of ${p.fromAssetId} -> ${p.toAssetId}`);
-      const prepared = [await prepareSwap(ctx, { accountId: p.accountId, fromAssetId: p.fromAssetId, toAssetId: p.toAssetId, fromAmount: String(p.amount), description })];
+      const prepared = [await prepareOrResumeSwap(ctx, s, { accountId: p.accountId, fromAssetId: p.fromAssetId, toAssetId: p.toAssetId, fromAmount: String(p.amount), description })];
       return { fired: true, reason: due ? `due (schedule '${p.schedule}')` : "forced (explicit run)", conditionValue: null, prepared };
     }
     case "idle_to_stake": {
@@ -297,7 +331,7 @@ export async function fireStrategy(ctx, s, opts = {}) {
             s,
             `de_risk: ${p.assetId} price ${price} crossed <= target ${target} — swapping ${amount} ${p.assetId} -> ${p.toAssetId}`
           );
-          return [await prepareSwap(ctx, { accountId: p.accountId, fromAssetId: p.assetId, toAssetId: p.toAssetId, fromAmount: String(amount), description })];
+          return [await prepareOrResumeSwap(ctx, s, { accountId: p.accountId, fromAssetId: p.assetId, toAssetId: p.toAssetId, fromAmount: String(amount), description })];
         },
       });
     }
@@ -314,7 +348,7 @@ export async function fireStrategy(ctx, s, opts = {}) {
             s,
             `price_target: ${p.assetId} hit ${price}, target ${target} (${p.direction}) — swapping ${p.amount} ${p.fromAssetId} -> ${p.toAssetId}`
           );
-          return [await prepareSwap(ctx, { accountId: p.accountId, fromAssetId: p.fromAssetId, toAssetId: p.toAssetId, fromAmount: String(p.amount), description })];
+          return [await prepareOrResumeSwap(ctx, s, { accountId: p.accountId, fromAssetId: p.fromAssetId, toAssetId: p.toAssetId, fromAmount: String(p.amount), description })];
         },
       });
     }

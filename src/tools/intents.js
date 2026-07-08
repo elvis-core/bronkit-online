@@ -56,6 +56,12 @@ const POLL_INTERVAL_MS = Number(process.env.BRONKIT_POLL_INTERVAL_MS ?? 3000);
 const DEFAULT_MAX_WAIT_S = 25;
 const MAX_MAX_WAIT_S = 90;
 
+// A 409 on intent-create means a same-pair intent is still active. Bron has no
+// cancel-intent endpoint, but intents are short-lived (~40s), so we auto-retry with
+// a fresh unique id, waiting the blocker out, instead of erroring at the user.
+const CONFLICT_RETRIES = Number(process.env.BRONKIT_CONFLICT_RETRIES ?? 4);
+const CONFLICT_RETRY_MS = Number(process.env.BRONKIT_CONFLICT_RETRY_MS ?? 10000);
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowIso = () => new Date().toISOString();
 
@@ -280,8 +286,8 @@ export const swapTool = {
     "Swap one asset for another via Bron's Intents auction. SAFE TO CALL — does NOT move funds; funds move only when the user signs the resulting transaction in the Bron app (MPC gate). " +
     "Full flow this tool drives: 1) create the intent, 2) poll until a solver prices it in the auction, 3) create the SIGNABLE transaction (transactionType:intents) — which appears in the Bron app for the user to sign. " +
     "Three actions: " +
-    "action:'quote' = indicative price preview (POST /intents/quote, no order created) — show the user price/fees first. " +
-    "action:'create' = place the intent (auto-generates intentId) AND, once a solver prices it within the poll window, create the signable transaction; the result returns signableTransactionId when that happens. Requires accountId. " +
+    "action:'quote' = OPTIONAL indicative price preview (POST /intents/quote, no order created) — only if the user explicitly asks to preview; do NOT quote-then-confirm before a swap (the quote expires in seconds). " +
+    "action:'create' = the DEFAULT for a swap request: place it directly WITHOUT asking the user to confirm first (auto-generates a unique intentId; auto-retries a 409 same-pair conflict with a fresh id). Once a solver prices it within the poll window it creates the signable transaction (returns signableTransactionId). The user reviews the price and signs or declines in the Bron app — that is the confirmation. Requires accountId. " +
     "action:'status' = re-check an existing intent by intentId; pass accountId so that if a solver has since priced it, the signable transaction is created on this check too (idempotent). " +
     "Identify assets by id (fromAssetId / toAssetId) and give exactly one of fromAmount or toAmount. " +
     "IMPORTANT — Bron intents have a SHORT settlement window (~40s). Two distinct expiry cases the result distinguishes: (a) everPriced=false → no solver bid in time (real liquidity gap); (b) expiredAfterPricing=true → a solver DID price it and a signable tx was (or would be) created, but it was not signed within the window, so it expired — this is NOT a solver problem, the swap works and just needs prompt signing in the Bron app. The signable tx inherits the intent deadline, so 'prepare now, sign later' automation will usually miss the window unless signing is automated on the Bron side. " +
@@ -320,7 +326,7 @@ export const swapTool = {
         action: "quote",
         preview: true,
         quote,
-        note: "Indicative quote only — no intent/order created. Show the user the price and fees, then use action:'create' to place the swap.",
+        note: "Indicative quote only — no intent/order created. OPTIONAL: only use this if the user explicitly wants a price preview. For an actual swap, call action:'create' directly — do NOT quote-then-confirm (the quote expires in seconds).",
       };
     }
 
@@ -328,37 +334,49 @@ export const swapTool = {
       if (!a.accountId) throw new Error("create needs accountId.");
       if (!a.fromAssetId || !a.toAssetId) throw new Error("create needs fromAssetId and toAssetId.");
       requireExactlyOneAmount(a);
-      const intentId = a.intentId || randomUUID();
-      const body = { accountId: a.accountId, intentId, fromAssetId: a.fromAssetId, toAssetId: a.toAssetId };
-      if (a.fromAmount != null && a.fromAmount !== "") body.fromAmount = a.fromAmount;
-      if (a.toAmount != null && a.toAmount !== "") body.toAmount = a.toAmount;
+      const amountFields = {};
+      if (a.fromAmount != null && a.fromAmount !== "") amountFields.fromAmount = a.fromAmount;
+      if (a.toAmount != null && a.toAmount !== "") amountFields.toAmount = a.toAmount;
 
       // Create returns the initial Intent (already carries a status) — seed the
       // poll with it. Then poll until a solver prices it and create the signable
       // transaction (step 3) so it appears in the Bron app to sign.
+      //
+      // On a 409 (a same-pair intent is still active) auto-retry with a FRESH unique
+      // id, waiting out the short-lived blocker — Bron has no cancel-intent endpoint,
+      // so this is the working equivalent of "clear the obsolete one and create new".
+      let intentId = a.intentId || randomUUID();
       let created;
-      try {
-        created = await ctx.client.post(`${ws(ctx)}/intents`, body);
-      } catch (e) {
-        // 409 = Bron already has an ACTIVE intent for this account+asset pair. Our
-        // intentId is already unique per call, so a fresh id doesn't help — the
-        // existing intent has to clear (settle / expire — intents are short-lived —
-        // or be cancelled in the Bron app) before a new one is accepted. Report it
-        // cleanly instead of dying with a bare error.
-        if (e && (e.status === 409 || e.code === "conflict")) {
-          return {
-            action: "create",
-            intentId,
-            conflict: true,
-            status: null,
-            guidance:
-              "Swap not created — Bron returned a conflict (409): a swap for this account and asset pair is already pending. " +
-              "Intents are short-lived; wait for it to settle or expire, or cancel the pending swap in the Bron app, then retry. " +
-              "If this recurs, you likely have more than one strategy swapping the same pair — keep just one.",
-            conflictError: e.message,
-          };
+      let lastConflict;
+      for (let attempt = 0; attempt <= CONFLICT_RETRIES; attempt++) {
+        const body = { accountId: a.accountId, intentId, fromAssetId: a.fromAssetId, toAssetId: a.toAssetId, ...amountFields };
+        try {
+          created = await ctx.client.post(`${ws(ctx)}/intents`, body);
+          lastConflict = null;
+          break;
+        } catch (e) {
+          const isConflict = e && (e.status === 409 || e.code === "conflict");
+          if (!isConflict) throw e; // other failures propagate with the rich message
+          lastConflict = e;
+          if (attempt < CONFLICT_RETRIES) {
+            if (CONFLICT_RETRY_MS > 0) await sleep(CONFLICT_RETRY_MS); // let the blocker expire
+            intentId = a.intentId ? intentId : randomUUID(); // fresh id unless caller pinned one
+          }
         }
-        throw e; // other failures propagate with the rich Bron API message
+      }
+      if (lastConflict) {
+        // Still blocked after waiting out the window — surface it clearly (rare).
+        return {
+          action: "create",
+          intentId,
+          conflict: true,
+          status: null,
+          guidance:
+            "Swap not created — a same-pair swap for this account is still pending after auto-retry. " +
+            "Bron has no cancel-intent API; the pending one is short-lived, so try again in a minute. " +
+            "If it persists, cancel the pending swap in the Bron app.",
+          conflictError: lastConflict.message,
+        };
       }
       const r = await pollAndMaybeSign(ctx, {
         intentId,

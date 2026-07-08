@@ -115,6 +115,7 @@ export class FileStore {
       lastFiredAt: null,
       lastObservedPrice: null, // price triggers: price seen at the previous run (crossing detection)
       armed: true, // price triggers: false after firing until it re-crosses / is re-enabled
+      lastIntentId: null, // the swap intent this strategy last created — resumed/completed instead of duplicated
       scheduledTaskId: null, // optional id of a recurring Claude task the user set up to evaluate strategies
       createdAt: new Date().toISOString(),
     };
@@ -143,6 +144,7 @@ export class FileStore {
     if (patch.scheduledTaskId !== undefined) s.scheduledTaskId = patch.scheduledTaskId;
     if (patch.lastObservedPrice !== undefined) s.lastObservedPrice = patch.lastObservedPrice;
     if (patch.armed !== undefined) s.armed = !!patch.armed;
+    if (patch.lastIntentId !== undefined) s.lastIntentId = patch.lastIntentId;
     this._save();
     return s;
   }

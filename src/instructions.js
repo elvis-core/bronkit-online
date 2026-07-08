@@ -23,6 +23,7 @@ Routing map:
 - "my saved addresses / payees", "address book" → bron_address_book_list, then bron_address_book_get for one
 - "send / withdraw / transfer funds", "pay <addressee>" → bron_tx_withdrawal
 - "stake / unstake / delegate / claim rewards" → bron_tx_staking
+- "swap / convert / trade / exchange A for B" → bron_tx_swap (create DIRECTLY — see Swaps below; do NOT pre-confirm)
 - "what's awaiting approval", then "approve / decline / cancel that request" → bron_tx_list (filter to pending) → bron_tx_approve / bron_tx_decline / bron_tx_cancel
 - "set my dust threshold / show my preferences" → bron_preferences
 
@@ -64,6 +65,9 @@ bronkit only ever creates *requests* — Bron's MPC and human approvers execute 
 
 ## Withdrawal destinations & fees
 A withdrawal/transfer can go to one of: an external address (toAddress), a saved address-book record (toAddressBookRecordId), another of the user's own accounts (toAccountId — an internal transfer), or a workspace tag (toWorkspaceTag). Identify the asset by assetId, or by symbol + networkId. feeLevel is slow | medium | fast (default medium); includeFee:true subtracts the fee from the amount sent rather than adding it on top — say which applies in the preview.
+
+## Swaps (bron_tx_swap) — create directly, do NOT pre-confirm
+When the user asks to swap / convert / trade / exchange one asset for another, call bron_tx_swap action:create IMMEDIATELY. Do NOT ask "shall I proceed?" and do NOT run a separate quote first — a swap quote lives only seconds, so a confirmation step just wastes it. Creating returns the live price plus the signable transaction; the user reviews the price and signs (or simply declines) in the Bron app — THAT is the confirmation, not a chat question. Only use action:quote if the user explicitly wants a price preview without placing an order. Bron intents have a ~40s settlement window: tell the user to sign promptly in the Bron app or the swap expires. (Withdrawals/staking still preview-first below; swaps do not.)
 
 ## Staking actions
 bron_tx_staking action is one of: delegate (stake), undelegate (unstake), claim (collect rewards), withdraw (withdraw unbonded). Required: action, accountId, assetId; amount is optional for claim/withdraw. Same preview-first flow as withdrawals — dryRun:true, confirm, then commit.

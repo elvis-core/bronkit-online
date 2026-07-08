@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 process.env.BRONKIT_POLL_INTERVAL_MS = "0"; // no real-time swap polling
+process.env.BRONKIT_CONFLICT_RETRY_MS = "0"; // no real-time waiting on 409 auto-retry
 process.env.BRONKIT_MASTER_KEY = "test-master";
 process.env.OAUTH_SIGNING_SECRET = "test-signing";
 
@@ -329,10 +330,10 @@ test("swap 409 conflict: reported cleanly (not a false success), no signable tx,
   const ctx = freshCtx({ intentConflict: true });
   const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", amount: "20", schedule: "hourly" } });
   const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
-  // The prepare attempt is NOT ok, and it carries the conflict reason.
+  // After auto-retry fails to clear, the prepare attempt is NOT ok and reports it.
   assert.equal(out.prepared[0].ok, false);
   assert.equal(out.prepared[0].result.conflict, true);
-  assert.match(out.prepared[0].result.guidance, /conflict/i);
+  assert.match(out.prepared[0].result.guidance, /pending|auto-retry/i);
   // It did not throw and never reached the signable-transaction step.
   assert.ok(!ctx.client.calls.some((c) => c.path.endsWith("/transactions")), "no signable tx created on conflict");
 });
@@ -350,6 +351,20 @@ test("strategy_create warns when a new strategy duplicates an enabled same-pair 
   // A disabled duplicate does not warn (it won't fire concurrently).
   const dis = T.strategy_create.handler(ctx, { type: "dca", params: { ...p, amount: "7" }, enabled: false });
   assert.ok(!dis.warning, "disabled duplicate -> no warning");
+});
+
+test("swap strategy RESUMES an existing priced intent into a signable tx (no duplicate create)", async () => {
+  const ctx = freshCtx({ intentGet: PRICED_INTENT });
+  const s = T.strategy_create.handler(ctx, { type: "dca", params: { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", amount: "20", schedule: "hourly" } });
+  // Simulate a prior fire that left a pending (now priced) intent for this pair.
+  ctx.store.updateStrategy(ctx.userId, s.id, { lastIntentId: "prev-intent-1" });
+  const out = await T.strategy_run.handler(ctx, { strategyId: s.id });
+  assert.equal(out.prepared[0].ok, true);
+  assert.equal(out.prepared[0].resumed, true, "completed the existing intent rather than duplicating");
+  assert.ok(out.prepared[0].result.signableTransactionId, "priced intent completed into a signable tx");
+  // Checked the stored intent id, and did NOT POST a duplicate intent.
+  assert.ok(ctx.client.calls.some((c) => c.method === "GET" && c.path.endsWith("/intents/prev-intent-1")));
+  assert.ok(!ctx.client.calls.some((c) => c.method === "POST" && /\/intents$/.test(c.path)), "no duplicate intent created");
 });
 
 test("disabled strategy is skipped on fire", async () => {
