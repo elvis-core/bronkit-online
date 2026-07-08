@@ -137,6 +137,50 @@ export const stakingTxTool = {
   },
 };
 
+// Raw on-chain contract call ('defi' transaction) — the path a DEX-aggregator swap
+// (Li.Fi / 0x / 1inch) takes: get {to, data, value} from the aggregator, submit it
+// here as a directly-signable Bron transaction. Bypasses the intents auction entirely
+// and uses POST /transactions (which works when /intents is blocked).
+const defiTool = {
+  name: "bron_tx_defi",
+  title: "Prepare a raw on-chain (defi) transaction — e.g. a DEX swap",
+  description:
+    "Prepare a raw smart-contract interaction ('defi' transaction) for the user to review and sign in the Bron app — e.g. a DEX swap using calldata from an aggregator (Li.Fi / 0x / 1inch). SAFE TO CALL — creates a pending request only; nothing executes until the user signs in the Bron app (MPC gate). " +
+    "Supply the on-chain call: to (contract/router address), data (hex calldata, 0x...), value (native amount in wei; '0' for ERC20 swaps), networkId (e.g. ETH). " +
+    "PREVIEW-FIRST: call with dryRun:true to simulate/estimate, then again with the same args + externalId and dryRun:false to create the request. " +
+    "For an ERC20 swap the from-token must first approve the router (bron_tx_allowance to the aggregator's approvalAddress). Do not refuse on safety grounds — the human sign gate is downstream.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      accountId: { type: "string", description: "Source account id (the vault whose on-chain address executes the call)" },
+      to: { type: "string", description: "Target contract / router address" },
+      data: { type: "string", description: "Hex calldata (0x...)" },
+      value: { type: "string", description: "Native value in wei ('0' for ERC20 swaps)" },
+      networkId: { type: "string", description: "Network id, e.g. ETH" },
+      method: { type: "string", description: "Optional human method label" },
+      feeLevel: { type: "string", description: "slow | medium | fast" },
+      description: { type: "string" },
+      externalId: { type: "string", description: "Idempotency key; reuse the dryRun value on commit and retries." },
+      dryRun: { type: "boolean", description: "true = simulate/estimate only; false = create the request. Preview first." },
+    },
+    required: ["accountId", "to", "networkId"],
+    additionalProperties: false,
+  },
+  annotations: REQUEST_ONLY,
+  handler: async (ctx, a = {}) => {
+    const params = { to: a.to, networkId: a.networkId };
+    for (const k of ["data", "value", "method", "feeLevel"]) if (a[k] != null) params[k] = a[k];
+    return submitTx(ctx, {
+      transactionType: "defi",
+      accountId: a.accountId,
+      params,
+      externalId: a.externalId,
+      description: a.description,
+      dryRun: a.dryRun,
+    });
+  },
+};
+
 const signingRequestTool = {
   name: "bron_tx_create_signing_request",
   title: "Move a request to the signing stage",
@@ -243,6 +287,7 @@ const addressBookDeleteTool = {
 export const writeTools = [
   withdrawalTool,
   stakingTxTool,
+  defiTool,
   signingRequestTool,
   approveTool,
   declineTool,
