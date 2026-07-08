@@ -7,6 +7,7 @@ import { writeTools } from "./writes.js";
 import { configTools } from "./config.js";
 import { intentTools } from "./intents.js";
 import { strategyTools } from "./strategies.js";
+import { swapTools } from "./swap.js";
 
-export const tools = [...readTools, ...compositeTools, ...writeTools, ...configTools, ...intentTools, ...strategyTools];
+export const tools = [...readTools, ...compositeTools, ...writeTools, ...configTools, ...intentTools, ...strategyTools, ...swapTools];
 export const toolsByName = new Map(tools.map((t) => [t.name, t]));
