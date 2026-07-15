@@ -9,7 +9,7 @@
 // user approved is exactly what gets created. The user never has to know
 // "dry-run" exists — the model previews automatically.
 
-import { randomUUID } from "node:crypto";
+import { bronId } from "../ids.js";
 
 const WRITE = { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
 // Tools that only create *pending requests* on the user's Bron workspace —
@@ -26,7 +26,7 @@ const ws = (ctx) => `/workspaces/${ctx.workspaceId}`;
 // supply it, and always echo it back so the model can reuse it on the commit
 // call (preview == commit) and on retries (idempotency).
 async function submitTx(ctx, { transactionType, accountId, params, externalId, description, dryRun }) {
-  const body = { accountId, externalId: externalId || randomUUID(), transactionType, params };
+  const body = { accountId, externalId: externalId || bronId(), transactionType, params };
   if (description) body.description = description;
   const path = dryRun ? `${ws(ctx)}/transactions/dry-run` : `${ws(ctx)}/transactions`;
   const result = await ctx.client.post(path, body);

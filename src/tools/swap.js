@@ -14,7 +14,7 @@
 // dryRun:false submits the create. Calldata never touches the model.
 
 import Decimal from "decimal.js";
-import { randomUUID } from "node:crypto";
+import { bronId } from "../ids.js";
 import { fetchDictionaryAssets, resolveAssetById } from "./assets.js";
 
 const REQUEST_ONLY = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
@@ -119,7 +119,7 @@ async function buildAndSubmit(ctx, a, { dryRun }) {
     return { error: "Li.Fi returned no route for this pair/amount", lifi: { message: q.message || null } };
   }
 
-  const externalId = a.externalId || randomUUID();
+  const externalId = a.externalId || bronId();
   const params = { to: tr.to, data: tr.data, value: tr.value != null ? tr.value : "0", networkId: from.networkId };
   const body = { accountId: a.accountId, externalId, transactionType: "defi", params };
   if (a.description) body.description = a.description;

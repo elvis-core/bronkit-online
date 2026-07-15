@@ -79,6 +79,7 @@ test("bron_swap: resolves asset/address/route and submits a defi tx (create)", a
     assert.equal(post.body.params.data, "0xdeadbeef");
     assert.equal(post.body.params.networkId, "ETH");
     assert.ok(ctx.calls.some((c) => c.path.endsWith("/addresses")), "resolved the vault address");
+    assert.match(out.externalId, /^[a-z0-9]{24}$/, "Bron-format externalId, not a UUID");
   } finally { restore(); }
 });
 
