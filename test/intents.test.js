@@ -75,6 +75,8 @@ test("create: generates intentId, posts intent, polls to wait-for-user-tx and su
 
   assert.equal(out.action, "create");
   assert.ok(out.intentId && out.intentId.length > 10, "a client intentId was generated");
+  assert.match(out.intentId, /^[a-z0-9]{24}$/, "Bron-format id (24-char base36)");
+  assert.doesNotMatch(out.intentId, /-/, "NOT a UUID — Bron rejects UUID intentIds with a 409");
   // The create POST used the generated intentId, not the server echo.
   const post = ctx.calls.find((c) => c.method === "POST");
   assert.equal(post.path, "/workspaces/ws-test/intents");

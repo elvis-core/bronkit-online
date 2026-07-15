@@ -23,7 +23,19 @@
 // surface. We surface context in the tool's own output instead, not by faking a
 // field the API doesn't have.
 
-import { randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
+
+// Bron requires client-generated ids in ITS format: 24-char lowercase base36.
+// A UUID intentId makes POST /intents fail with a generic 409 "Something went
+// wrong" — confirmed live 15 Jul 2026 (UUID 409s; this format prices and creates
+// the signable tx). This was the real cause of the "week-long Bron-side 409".
+const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+function bronId(len = 24) {
+  const b = randomBytes(len);
+  let s = "";
+  for (let i = 0; i < len; i++) s += ID_ALPHABET[b[i] % ID_ALPHABET.length];
+  return s;
+}
 
 // Mirror writes.js: a request-only tool. `create` places an intent into the
 // auction, but no funds move until the user signs at wait-for-user-tx in the
@@ -337,7 +349,7 @@ export const swapTool = {
       // workspace-wide (every pair/account) while reads/quote/withdrawals work — so a
       // 409 is a Bron-side condition on the intent-create endpoint (possibly a rate
       // limit/cooldown), NOT a fixable same-pair conflict. Retrying only hammers it.
-      const intentId = a.intentId || randomUUID();
+      const intentId = a.intentId || bronId();
       const body = { accountId: a.accountId, intentId, fromAssetId: a.fromAssetId, toAssetId: a.toAssetId, ...amountFields };
       let created;
       try {
