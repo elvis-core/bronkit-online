@@ -34,6 +34,12 @@ export function normalizeAsset(r) {
     return null;
   };
   const assetId = pick("assetId", "id", "asset_id");
+  // Confirmed live: the contract lives under contractInformation.contractAddress
+  // (native coins have no contractInformation). Top-level variants kept as a
+  // fallback in case the shape shifts.
+  const ci = r.contractInformation && typeof r.contractInformation === "object" ? r.contractInformation : {};
+  const contractAddress =
+    pick("contractAddress", "contract_address", "tokenAddress", "address") || ci.contractAddress || ci.address || null;
   return {
     assetId: assetId != null ? String(assetId) : null,
     symbol: pick("symbol", "assetSymbol", "ticker"),
@@ -41,7 +47,9 @@ export function normalizeAsset(r) {
     networkId: pick("networkId", "network", "chain", "networkCode"),
     chainId: pick("chainId", "evmChainId", "networkChainId"),
     decimals: pick("decimals", "decimal", "precision"),
-    contractAddress: pick("contractAddress", "contract_address", "tokenAddress", "address", "contract"),
+    contractAddress,
+    standard: ci.standard || null,
+    verified: r.verified != null ? r.verified : null,
   };
 }
 
@@ -66,6 +74,7 @@ const assetsListTool = {
       networkId: { type: "string", description: "Network filter, e.g. SOL, ETH, ARB (case-insensitive)" },
       assetId: { type: "string", description: "Return just this asset id" },
       search: { type: "string", description: "Substring match on symbol or name (case-insensitive)" },
+      includeUnverified: { type: "boolean", description: "Include unverified assets (default false — the dictionary contains scam/spoof tokens; verified-only by default)" },
       limit: { type: "integer", description: "Max rows to return (default 50)" },
     },
     additionalProperties: false,
@@ -77,6 +86,7 @@ const assetsListTool = {
     const eq = (x, y) => String(x || "").toLowerCase() === String(y || "").toLowerCase();
     const sub = (hay, needle) => String(hay || "").toLowerCase().includes(String(needle).toLowerCase());
     let rows = all;
+    if (!a.includeUnverified) rows = rows.filter((r) => r.verified === true);
     if (a.assetId) rows = rows.filter((r) => String(r.assetId) === String(a.assetId));
     if (a.symbol) rows = rows.filter((r) => eq(r.symbol, a.symbol));
     if (a.networkId) rows = rows.filter((r) => eq(r.networkId, a.networkId));

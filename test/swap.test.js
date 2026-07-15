@@ -109,9 +109,11 @@ test("bron_swap: P1 — resolves the route by dictionary CONTRACT address, not b
     // USDT on Arbitrum: symbol lookup 404s at Li.Fi (USDT0), but the dictionary
     // carries the contract + decimals, so we must route by address and never do a
     // by-symbol /token lookup for it.
+    // Real dictionary shape: contract nested under contractInformation, decimals a
+    // string, no chainId (resolved from networkId), native ETH has no contract.
     const dict = [
-      { assetId: "5011", symbol: "USDT", networkId: "ARB", chainId: 42161, decimals: 6, contractAddress: "0xUSDT0onArb" },
-      { assetId: "7", symbol: "ETH", networkId: "ARB", chainId: 42161, decimals: 18, contractAddress: null },
+      { assetId: "5011", symbol: "USDT", networkId: "ARB", decimals: "6", verified: true, contractInformation: { contractAddress: "0xUSDT0onArb", standard: "erc20" } },
+      { assetId: "7", symbol: "ETH", networkId: "ARB", decimals: "18", verified: true },
     ];
     const ctx = mockCtx({ dict });
     const out = await bronSwap.handler(ctx, { accountId: "acc1", fromAssetId: "5011", toAssetId: "7", fromAmount: "10", dryRun: true });
@@ -128,8 +130,8 @@ test("bron_swap: EVM source into a non-EVM destination (Solana) is rejected towa
   const restore = mockLifi();
   try {
     const dict = [
-      { assetId: "5000", symbol: "USDC", networkId: "ETH", chainId: 1, decimals: 6, contractAddress: "0xUSDConEth" },
-      { assetId: "9999", symbol: "USDC", networkId: "SOL", chainId: null, decimals: 6, contractAddress: "Es9v...SPL" },
+      { assetId: "5000", symbol: "USDC", networkId: "ETH", decimals: "6", verified: true, contractInformation: { contractAddress: "0xUSDConEth", standard: "erc20" } },
+      { assetId: "9999", symbol: "USDC", networkId: "SOL", decimals: "6", verified: true, contractInformation: { contractAddress: "Es9vSPL", standard: "spl" } },
     ];
     const ctx = mockCtx({ dict });
     await assert.rejects(
