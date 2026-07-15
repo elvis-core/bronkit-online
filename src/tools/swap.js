@@ -1,5 +1,9 @@
-// Direct DEX swap via Li.Fi — the mechanism the Bron UI uses, and the replacement
-// for the intents auction (which is 409-blocked workspace-wide + has a ~40s window).
+// Direct swap via Bron's 'swap-lifi' transaction type — the exact mechanism the
+// Bron UI uses (verified against a real UI swap-lifi tx). bronkit fetches a Li.Fi
+// quote and submits transactionType:swap-lifi with params {fromAssetId, toAssetId,
+// quoteId, fromAmount}, where quoteId IS the Li.Fi quote's id ("uuid:0"); Bron
+// re-fetches + executes that route. Handles cross-chain (Li.Fi bridges), which the
+// intents auction does not. NOT 'defi' (that 403s for API keys).
 //
 // Driven by plain Bron inputs: accountId + fromAssetId + toAssetId + human amount.
 // bronkit resolves everything itself:
@@ -113,15 +117,18 @@ async function buildAndSubmit(ctx, a, { dryRun }) {
     fromToken: fromTok.address, toToken: toTok.address,
     fromAmount: fromAmountUnits, fromAddress, slippage: a.slippage || "0.005",
   });
-  const tr = q.transactionRequest || {};
   const est = q.estimate || {};
-  if (!tr.to || !tr.data) {
-    return { error: "Li.Fi returned no route for this pair/amount", lifi: { message: q.message || null } };
+  const quoteId = q.id; // Li.Fi quote id, e.g. "2fdcbfcd-...:0" — this IS Bron's swap-lifi quoteId
+  if (!quoteId) {
+    return { error: "Li.Fi returned no quote id for this pair/amount", lifi: { message: q.message || null } };
   }
 
+  // swap-lifi: Bron re-fetches and executes the Li.Fi route by its quote id (the
+  // exact mechanism the Bron UI uses — verified against a real UI swap-lifi tx).
+  // Cross-chain works here (Li.Fi bridges); intents do not bid cross-chain.
   const externalId = a.externalId || bronId();
-  const params = { to: tr.to, data: tr.data, value: tr.value != null ? tr.value : "0", networkId: from.networkId };
-  const body = { accountId: a.accountId, externalId, transactionType: "defi", params };
+  const params = { fromAssetId: a.fromAssetId, toAssetId: a.toAssetId, quoteId, fromAmount: a.fromAmount };
+  const body = { accountId: a.accountId, externalId, transactionType: "swap-lifi", params };
   if (a.description) body.description = a.description;
 
   const toAmountHuman = est.toAmount ? new Decimal(est.toAmount).div(new Decimal(10).pow(toTok.decimals)).toString() : null;
@@ -129,44 +136,34 @@ async function buildAndSubmit(ctx, a, { dryRun }) {
     from: `${a.fromAmount} ${from.symbol}`,
     toEstimated: toAmountHuman ? `~${toAmountHuman} ${to.symbol}` : null,
     via: q.toolDetails ? q.toolDetails.name : q.tool,
+    crossChain: chainId !== toChainId,
     fromAddress,
-    router: tr.to,
     approvalAddress: est.approvalAddress,
+    quoteId,
   };
 
-  // Preview (dryRun) STOPS at the route. It never calls Bron, so it is a genuine
-  // read — no state-changing endpoint is touched — and it stays useful even when the
-  // Bron create endpoint is permission-blocked (403 create-vault-defi-transaction).
-  if (dryRun) {
-    return {
-      dryRun: true,
-      externalId,
-      swap: summary,
-      guidance:
-        `Preview only — no Bron request was created (route resolved via ${summary.via || "Li.Fi"}). ` +
-        (est.approvalAddress
-          ? `This ERC20 source needs an approval first: approve ${from.symbol} to ${est.approvalAddress} with bron_tx_allowance. `
-          : "") +
-        "To create the signable swap, call again with dryRun:false and the same externalId.",
-    };
-  }
-
+  // dryRun hits Bron's /transactions/dry-run (simulates, creates nothing) so it
+  // reports live whether the key can create a swap-lifi and whether an approval is
+  // needed; dryRun:false creates the signable swap. Each call re-quotes, so the
+  // real call carries a fresh (unexpired) quoteId.
   let bron, bronError;
   try {
-    bron = await ctx.client.post(`${ws(ctx)}/transactions`, body);
+    bron = await ctx.client.post(dryRun ? `${ws(ctx)}/transactions/dry-run` : `${ws(ctx)}/transactions`, body);
   } catch (e) {
     bronError = e.message;
   }
   return {
-    dryRun: false,
+    dryRun: !!dryRun,
     externalId,
     swap: summary,
-    signableTransactionId: bron && (bron.transactionId || (bron.transaction && bron.transaction.transactionId)),
+    signableTransactionId: !dryRun && bron && (bron.transactionId || (bron.transaction && bron.transaction.transactionId)),
     bron: bron || undefined,
     bronError: bronError || undefined,
     guidance: bronError
-      ? `Bron rejected the swap: ${bronError}. If it mentions allowance/approval, first approve ${from.symbol} to ${est.approvalAddress} (bron_tx_allowance), then retry.`
-      : "Signable swap created — sign it in the Bron app to execute.",
+      ? `Bron rejected the swap-lifi ${dryRun ? "simulation" : "create"}: ${bronError}. If it mentions allowance/approval, approve ${from.symbol} to ${est.approvalAddress || "the router"} with bron_tx_allowance first, then retry.`
+      : dryRun
+        ? `Dry-run OK via ${summary.via || "Li.Fi"}${summary.crossChain ? " (cross-chain)" : ""}. ${est.approvalAddress ? `ERC20 source: approve ${from.symbol} to ${est.approvalAddress} (bron_tx_allowance) before the real swap. ` : ""}Call again with dryRun:false to create the signable swap.`
+        : "Signable swap created — sign it in the Bron app to execute (within the quote's validity window).",
   };
 }
 
@@ -174,10 +171,10 @@ const swapTool = {
   name: "bron_swap",
   title: "Swap one asset for another (direct DEX via Li.Fi)",
   description:
-    "Swap one asset for another. This is THE swap tool — it gets a Li.Fi DEX route and submits it as a Bron 'defi' transaction (the mechanism the Bron UI uses). SAFE TO CALL — creates a pending request only; nothing executes until the user signs in the Bron app (MPC gate). " +
-    "Just give it accountId, fromAssetId, toAssetId and a human fromAmount (e.g. '20' for 20 USDT) — bronkit resolves the symbols, the vault's on-chain address, decimals, and the route itself. " +
-    "PREVIEW-FIRST: call dryRun:true to fetch the Li.Fi route only (no Bron call, no request created), show the user the expected output, then dryRun:false (same externalId) to create the signable swap. " +
-    "For an ERC20 source token the token must first approve the route's approvalAddress (returned in the result) — use bron_tx_allowance. EVM chains only (not Canton).",
+    "Swap one asset for another, including CROSS-CHAIN (e.g. USDC on Ethereum -> USDC on Arbitrum). This is THE swap tool — it fetches a Li.Fi quote and submits it as a Bron 'swap-lifi' transaction (the exact mechanism the Bron UI uses, verified against a real UI swap). SAFE TO CALL — creates a pending request only; nothing executes until the user signs in the Bron app (MPC gate). " +
+    "Just give it accountId, fromAssetId, toAssetId and a human fromAmount (e.g. '20' for 20 USDT) — bronkit resolves the contracts/decimals and the Li.Fi quote id itself. " +
+    "PREVIEW-FIRST: dryRun:true simulates via Bron's dry-run (creates nothing) and reports the expected output + whether an approval is needed; dryRun:false creates the signable swap. " +
+    "For an ERC20 source the token must first approve the route's approvalAddress (returned in the result) via bron_tx_allowance. EVM chains only (Canton/Solana are not Li.Fi-routable — use bron_tx_swap intents for those).",
   inputSchema: {
     type: "object",
     properties: {

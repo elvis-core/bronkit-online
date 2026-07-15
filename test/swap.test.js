@@ -1,5 +1,5 @@
 // Tests for bron_swap: resolves Bron asset/address data, fetches a Li.Fi route
-// (mocked via global fetch), and submits it as a 'defi' transaction. No network.
+// (mocked via global fetch), and submits it as a 'swap-lifi' transaction. No network.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -50,6 +50,7 @@ function mockLifi() {
     }
     if (u.includes("/quote")) {
       return { ok: true, text: async () => JSON.stringify({
+        id: "lifiquote-1:0",
         tool: "1inch", toolDetails: { name: "1inch" },
         transactionRequest: { to: "0xRouter", data: "0xdeadbeef", value: "0x0", chainId: 1 },
         estimate: { fromAmount: "20000000", toAmount: "11000000000000000", approvalAddress: "0xRouter" },
@@ -74,24 +75,28 @@ test("bron_swap: resolves asset/address/route and submits a defi tx (create)", a
     assert.equal(out.swap.fromAddress, "0xVault");
     const post = ctx.calls.find((c) => c.method === "POST");
     assert.equal(post.path, "/workspaces/ws/transactions");
-    assert.equal(post.body.transactionType, "defi");
-    assert.equal(post.body.params.to, "0xRouter");
-    assert.equal(post.body.params.data, "0xdeadbeef");
-    assert.equal(post.body.params.networkId, "ETH");
+    assert.equal(post.body.transactionType, "swap-lifi");
+    assert.equal(post.body.params.quoteId, "lifiquote-1:0");
+    assert.equal(post.body.params.fromAssetId, "5002");
+    assert.equal(post.body.params.toAssetId, "2");
+    assert.equal(post.body.params.fromAmount, "20");
     assert.ok(ctx.calls.some((c) => c.path.endsWith("/addresses")), "resolved the vault address");
     assert.match(out.externalId, /^[a-z0-9]{24}$/, "Bron-format externalId, not a UUID");
   } finally { restore(); }
 });
 
-test("bron_swap: dryRun fetches the route only and never calls Bron", async () => {
+test("bron_swap: dryRun simulates via Bron's dry-run endpoint as swap-lifi", async () => {
   const restore = mockLifi();
   try {
     const ctx = mockCtx({ postResp: { estimations: [] } });
     const out = await bronSwap.handler(ctx, { accountId: "acc1", fromAssetId: "5002", toAssetId: "2", fromAmount: "20", dryRun: true });
     assert.equal(out.dryRun, true);
     assert.equal(out.swap.approvalAddress, "0xRouter");
-    assert.equal(ctx.calls.find((c) => c.method === "POST"), undefined, "dryRun must not POST to Bron");
-    assert.match(out.guidance, /Preview only/);
+    const post = ctx.calls.find((c) => c.method === "POST");
+    assert.equal(post.path, "/workspaces/ws/transactions/dry-run");
+    assert.equal(post.body.transactionType, "swap-lifi");
+    assert.equal(post.body.params.quoteId, "lifiquote-1:0");
+    assert.match(out.guidance, /Dry-run OK/);
   } finally { restore(); }
 });
 
