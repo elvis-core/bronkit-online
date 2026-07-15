@@ -60,6 +60,28 @@ export async function resolveAssetById(client, assetId, prefetched) {
   return found || null;
 }
 
+// Resolve to a concrete assetId: pass through if given, else look up symbol +
+// networkId in the dictionary (preferring a verified match, since the catalog
+// contains spoof tokens). Throws a clear error rather than sending assetId:null.
+// Use for params where Bron REQUIRES assetId (e.g. AllowanceParams) and does not
+// accept symbol+networkId itself.
+export async function resolveAssetId(client, { assetId, symbol, networkId }) {
+  if (assetId != null && assetId !== "") return String(assetId);
+  if (!symbol || !networkId) {
+    throw new Error("Identify the asset with assetId, or with both symbol and networkId.");
+  }
+  const dict = (await fetchDictionaryAssets(client)).map(normalizeAsset).filter(Boolean);
+  const eq = (a) =>
+    a.symbol && a.networkId &&
+    a.symbol.toLowerCase() === String(symbol).toLowerCase() &&
+    a.networkId.toLowerCase() === String(networkId).toLowerCase();
+  const match = dict.find((a) => eq(a) && a.verified === true) || dict.find(eq);
+  if (!match || !match.assetId) {
+    throw new Error(`No asset found for ${symbol} on ${networkId}. Look it up with bron_assets_list and pass assetId.`);
+  }
+  return match.assetId;
+}
+
 const assetsListTool = {
   name: "bron_assets_list",
   title: "List the Bron asset catalog (dictionary)",

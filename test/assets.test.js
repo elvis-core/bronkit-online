@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 process.env.BRONKIT_MASTER_KEY = "test-master";
 process.env.OAUTH_SIGNING_SECRET = "test-signing";
 
-const { assetsTools, normalizeAsset } = await import("../src/tools/assets.js");
+const { assetsTools, normalizeAsset, resolveAssetId } = await import("../src/tools/assets.js");
 const list = assetsTools[0];
 
 const DICT = [
@@ -42,4 +42,25 @@ test("bron_assets_list hides unverified assets by default", async () => {
   const all = await list.handler(ctx(), { symbol: "USDC", networkId: "ETH", includeUnverified: true });
   assert.equal(all.returned, 1);
   assert.equal(all.assets[0].assetId, "666");
+});
+
+test("resolveAssetId: passes a given assetId through without any lookup", async () => {
+  let called = false;
+  const client = { get: async () => { called = true; return { assets: DICT }; } };
+  assert.equal(await resolveAssetId(client, { assetId: "5012" }), "5012");
+  assert.equal(called, false, "no dictionary fetch when assetId is already known");
+});
+
+test("resolveAssetId: resolves symbol+networkId to the assetId (the allowance fallback)", async () => {
+  assert.equal(await resolveAssetId(ctx().client, { symbol: "USDC", networkId: "ARB" }), "5012");
+});
+
+test("resolveAssetId: prefers a verified match over a same-symbol spoof", async () => {
+  const dict2 = [...DICT, { assetId: "5000", networkId: "ETH", symbol: "USDC", decimals: "6", verified: true, contractInformation: { contractAddress: "0xreal" } }];
+  const client = { get: async () => ({ assets: dict2 }) };
+  assert.equal(await resolveAssetId(client, { symbol: "USDC", networkId: "ETH" }), "5000"); // not the 666 spoof
+});
+
+test("resolveAssetId: throws a clear error when it cannot resolve", async () => {
+  await assert.rejects(() => resolveAssetId(ctx().client, { symbol: "NOPE", networkId: "ETH" }), /bron_assets_list/);
 });

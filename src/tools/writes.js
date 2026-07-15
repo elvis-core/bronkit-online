@@ -10,6 +10,7 @@
 // "dry-run" exists — the model previews automatically.
 
 import { bronId } from "../ids.js";
+import { resolveAssetId } from "./assets.js";
 
 const WRITE = { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
 // Tools that only create *pending requests* on the user's Bron workspace —
@@ -207,8 +208,11 @@ const allowanceTool = {
   },
   annotations: REQUEST_ONLY,
   handler: async (ctx, a = {}) => {
-    const params = { toAddress: a.toAddress };
-    for (const k of ["assetId", "symbol", "networkId", "amount", "feeLevel"]) if (a[k] != null) params[k] = a[k];
+    // Bron's AllowanceParams REQUIRES assetId (no symbol/networkId). Resolve the
+    // symbol+networkId fallback to a real assetId here instead of forwarding null.
+    const assetId = await resolveAssetId(ctx.client, { assetId: a.assetId, symbol: a.symbol, networkId: a.networkId });
+    const params = { toAddress: a.toAddress, assetId };
+    for (const k of ["amount", "feeLevel"]) if (a[k] != null) params[k] = a[k];
     if (a.unlimited != null) params.unlimited = a.unlimited;
     return submitTx(ctx, {
       transactionType: "allowance",
