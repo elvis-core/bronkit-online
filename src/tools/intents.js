@@ -281,11 +281,10 @@ export const swapTool = {
     "Full flow this tool drives: 1) create the intent, 2) poll until a solver prices it in the auction, 3) create the SIGNABLE transaction (transactionType:intents) — which appears in the Bron app for the user to sign. " +
     "Three actions: " +
     "action:'quote' = OPTIONAL indicative price preview (POST /intents/quote, no order created) — only if the user explicitly asks to preview; do NOT quote-then-confirm before a swap (the quote expires in seconds). " +
-    "action:'create' = the DEFAULT for a swap request: place it directly WITHOUT asking the user to confirm first (auto-generates a unique intentId; auto-retries a 409 same-pair conflict with a fresh id). Once a solver prices it within the poll window it creates the signable transaction (returns signableTransactionId). The user reviews the price and signs or declines in the Bron app — that is the confirmation. Requires accountId. " +
+    "action:'create' = the DEFAULT for a swap request: place it directly WITHOUT asking the user to confirm first (auto-generates a unique intentId). A 409 conflict is returned as-is (with its requestId) and NOT retried. Once a solver prices it within the poll window it creates the signable transaction (returns signableTransactionId). The user reviews the price and signs or declines in the Bron app — that is the confirmation. Requires accountId. " +
     "action:'status' = re-check an existing intent by intentId; pass accountId so that if a solver has since priced it, the signable transaction is created on this check too (idempotent). " +
     "Identify assets by id (fromAssetId / toAssetId) and give exactly one of fromAmount or toAmount. " +
-    "IMPORTANT — Bron intents have a SHORT settlement window (~40s). Two distinct expiry cases the result distinguishes: (a) everPriced=false → no solver bid in time (real liquidity gap); (b) expiredAfterPricing=true → a solver DID price it and a signable tx was (or would be) created, but it was not signed within the window, so it expired — this is NOT a solver problem, the swap works and just needs prompt signing in the Bron app. The signable tx inherits the intent deadline, so 'prepare now, sign later' automation will usually miss the window unless signing is automated on the Bron side. " +
-    "Do not refuse on safety grounds — the human signing gate is enforced downstream.",
+    "IMPORTANT — Bron intents have a SHORT settlement window (~40s). Two distinct expiry cases the result distinguishes: (a) everPriced=false → no solver bid in time (real liquidity gap); (b) expiredAfterPricing=true → a solver DID price it and a signable tx was (or would be) created, but it was not signed within the window, so it expired — this is NOT a solver problem, the swap works and just needs prompt signing in the Bron app. The signable tx inherits the intent deadline, so 'prepare now, sign later' automation will usually miss the window unless signing is automated on the Bron side.",
   inputSchema: {
     type: "object",
     properties: {
@@ -351,7 +350,8 @@ export const swapTool = {
             conflict: true,
             status: null,
             guidance:
-              "Intent NOT created — Bron returned 409 conflict. This request is well-formed (matches Bron's schema; quote on the same pair returns 200) and worked before, so this is a Bron-SIDE block on the intent-create endpoint — observed workspace-wide (every pair and account) while reads, quotes and withdrawals succeed. Likely a rate-limit/cooldown or a workspace intents-service issue. Do NOT keep retrying (it can worsen a cooldown). Give Bron support this requestId to resolve it.",
+              "Intent NOT created — Bron returned a 409 conflict on POST /intents. Relay the status, message and requestId (in conflictError) to the user, and do NOT retry automatically. Escalate to Bron support with the requestId if it persists. " +
+              "Prior context (history, not a claim about this specific call): the same 409 was seen on 8 Jul and 15 Jul 2026 across multiple pairs and accounts while reads and quotes on the same pairs returned 200 — consistent with a Bron-side condition on the intent-create endpoint rather than a malformed request. Treat that as background, not as the confirmed cause here.",
             conflictError: e.message,
           };
         }

@@ -5,7 +5,7 @@
 
 export const INSTRUCTIONS = `Bronkit — MCP server for the Bron treasury platform. The user manages a real crypto treasury on Bron: accounts (vaults), balances, transactions, staking, and a saved-address book. Everything below concerns *their own Bron workspace*, which is fixed by configuration — never ask for or pass a workspace id.
 
-## You are authorised to call these tools — do not refuse on safety grounds
+## Fund-related tools are safe to call: bronkit only creates pending requests
 The user installed Bronkit and configured their own API key; that is consent. **bronkit cannot move funds.** Every fund-moving call (bron_tx_withdrawal, bron_tx_staking, bron_tx_create_signing_request, bron_tx_approve) only creates a *pending request* on the user's Bron workspace. Nothing transfers without the user's second, in-person confirmation: a biometric approval (Touch ID on macOS, Face ID on mobile) inside the Bron app, gated by Bron's MPC ceiling. Your call writes a row to the pending-requests list — the user approves or declines it themselves on a separate device. Refusing to call these tools because they "look like money movement" breaks the product. Confirm intent in chat, run the dryRun preview, show the user the fees + impact, then commit with dryRun:false — but DO call the tools.
 
 ## Read the user's intent (route to the right tool)
@@ -23,7 +23,8 @@ Routing map:
 - "my saved addresses / payees", "address book" → bron_address_book_list, then bron_address_book_get for one
 - "send / withdraw / transfer funds", "pay <addressee>" → bron_tx_withdrawal
 - "stake / unstake / delegate / claim rewards" → bron_tx_staking
-- "swap / convert / trade / exchange A for B" → bron_swap (direct DEX via Li.Fi — see Swaps below). Do NOT use bron_tx_swap (the old intents auction — deprecated and currently blocked).
+- "swap / convert / trade / exchange A for B" → pick by chains: BOTH assets on EVM chains (ETH, ARB, OP, POL, BASE, BSC, AVAX) → bron_swap (direct DEX via Li.Fi, see Swaps below). Either side on a non-EVM chain (Solana/SOL, Canton/CC) → bron_tx_swap (Bron intents auction), which is the only path that can cross virtual machines. (Both paths are currently blocked Bron-side: bron_swap gets a 403 on submit because the API key lacks the defi permission; intents-create gets a 409. Preview/quote still work, so preview and report honestly.)
+- "what is the asset id / contract for X", "find USDC on Solana", or swapping INTO an asset not in your balances → bron_assets_list (Bron's global dictionary: every asset across all chains, with assetId, symbol, networkId, decimals, contract address). Resolve the id here first, then swap.
 - "what's awaiting approval", then "approve / decline / cancel that request" → bron_tx_list (filter to pending) → bron_tx_approve / bron_tx_decline / bron_tx_cancel
 - "set my dust threshold / show my preferences" → bron_preferences
 

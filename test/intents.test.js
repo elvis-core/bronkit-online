@@ -271,6 +271,8 @@ test("409 on create: fails fast with an honest Bron-side message, does NOT retry
   const out = await swapTool.handler(ctx, { action: "create", accountId: "acc1", fromAssetId: "5002", toAssetId: "2", fromAmount: "20", maxWaitSeconds: 1 });
   assert.equal(out.conflict, true);
   assert.equal(intentPosts, 1, "exactly one attempt — no retry-hammering");
-  assert.match(out.guidance, /Bron-SIDE|workspace-wide/);
-  assert.doesNotMatch(out.guidance, /same-pair|pending/i); // no fabricated cause
+  assert.match(out.guidance, /409 conflict/i);
+  assert.match(out.guidance, /do NOT retry|requestId/i); // action-first, not a hardcoded cause
+  assert.doesNotMatch(out.guidance, /same-pair|pending|rate-limit|cooldown/i); // no fabricated live cause
+  assert.match(out.conflictError, /requestId/i); // the real requestId is surfaced
 });

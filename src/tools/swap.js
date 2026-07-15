@@ -2,20 +2,25 @@
 // for the intents auction (which is 409-blocked workspace-wide + has a ~40s window).
 //
 // Driven by plain Bron inputs: accountId + fromAssetId + toAssetId + human amount.
-// bronkit resolves everything itself (verified against the live API):
-//   - asset symbol + network        <- GET /balances (rows carry symbol, networkId)
-//   - vault on-chain address         <- GET /addresses?accountId=&networkId=
-//   - token contract + decimals      <- Li.Fi GET /token (chain + symbol)
-//   - swap route {to,data,value}     <- Li.Fi GET /quote
-// then submits the route as a Bron 'defi' transaction (POST /transactions — the
-// endpoint that works). Preview-first (dry-run). Calldata never touches the model.
+// bronkit resolves everything itself:
+//   - symbol/network/contract/decimals <- GET /dictionary/assets (all assets, not
+//     just held; falls back to GET /balances if the dictionary is unavailable)
+//   - vault on-chain address           <- GET /addresses?accountId=&networkId=
+//   - swap route {to,data,value}       <- Li.Fi GET /quote, keyed by CONTRACT ADDRESS
+//     (symbols are not stable across chains; Li.Fi GET /token is used only to fill a
+//     missing address/decimals for a no-contract/native token)
+// then submits the route as a Bron 'defi' transaction (POST /transactions).
+// Preview-first: dryRun:true fetches the route only and never calls Bron;
+// dryRun:false submits the create. Calldata never touches the model.
 
 import Decimal from "decimal.js";
 import { randomUUID } from "node:crypto";
+import { fetchDictionaryAssets, resolveAssetById } from "./assets.js";
 
 const REQUEST_ONLY = { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
 const ws = (ctx) => `/workspaces/${ctx.workspaceId}`;
 const LIFI_BASE = process.env.LIFI_BASE || "https://li.quest/v1";
+const numOrNull = (v) => (v == null || v === "" ? null : Number(v));
 
 // Bron networkId -> Li.Fi numeric chain id (EVM only; Li.Fi cannot route non-EVM like Canton/CC).
 const CHAIN = { ETH: 1, ARB: 42161, OP: 10, POL: 137, MATIC: 137, BSC: 56, AVAX: 43114, BASE: 8453, FTM: 250, GNO: 100 };
@@ -28,12 +33,53 @@ async function lifi(path, params) {
   return JSON.parse(text);
 }
 
-// Resolve a Bron assetId -> { symbol, networkId } from the account's balances.
+// Fallback resolver: a Bron assetId -> { symbol, networkId } from the account's
+// balances (held assets only). Used when the dictionary is unavailable.
 async function assetMeta(ctx, accountId, assetId) {
   const data = await ctx.client.get(`${ws(ctx)}/balances`, { accountIds: accountId, nonEmpty: false });
   const row = ((data && data.balances) || []).find((b) => b.assetId === assetId);
-  if (!row) throw new Error(`asset ${assetId} not found in account ${accountId} balances — only assets currently held can be swapped for now`);
+  if (!row) throw new Error(`asset ${assetId} not found in account ${accountId} balances, and the dictionary did not resolve it either — check the id with bron_assets_list`);
   return { symbol: row.symbol, networkId: row.networkId };
+}
+
+// Best-effort dictionary fetch: [] on failure so resolution falls back to balances.
+async function safeDictionary(ctx) {
+  try {
+    return await fetchDictionaryAssets(ctx.client);
+  } catch {
+    return [];
+  }
+}
+
+// Resolve an asset id to everything Li.Fi needs. Prefers the dictionary (all
+// assets + contract + decimals + chainId); falls back to held balances.
+async function resolveAsset(ctx, accountId, assetId, dict) {
+  const rec = dict.length ? await resolveAssetById(ctx.client, assetId, dict) : null;
+  if (rec && rec.networkId) {
+    return {
+      symbol: rec.symbol,
+      networkId: rec.networkId,
+      chainId: numOrNull(rec.chainId),
+      decimals: numOrNull(rec.decimals),
+      contractAddress: rec.contractAddress || null,
+    };
+  }
+  const meta = await assetMeta(ctx, accountId, assetId);
+  return { symbol: meta.symbol, networkId: meta.networkId, chainId: null, decimals: null, contractAddress: null };
+}
+
+// The Li.Fi token id + decimals for an asset. Uses the dictionary CONTRACT ADDRESS
+// when present (stable across chains — symbols like USDT are not); only a token
+// with no contract in the dictionary (native coin, or a gap) falls back to Li.Fi's
+// by-symbol lookup, which returns the correct address (native = zero-address).
+async function lifiToken(asset, chainId) {
+  if (asset.contractAddress) {
+    let decimals = asset.decimals;
+    if (decimals == null) decimals = (await lifi("token", { chain: String(chainId), token: asset.contractAddress })).decimals;
+    return { address: asset.contractAddress, decimals };
+  }
+  const t = await lifi("token", { chain: String(chainId), token: asset.symbol });
+  return { address: t.address, decimals: asset.decimals != null ? asset.decimals : t.decimals };
 }
 
 // The vault's on-chain address for a network (Bron addresses API).
@@ -46,15 +92,18 @@ async function vaultAddress(ctx, accountId, networkId) {
 
 // One end-to-end swap: resolve -> Li.Fi route -> submit as a Bron 'defi' tx.
 async function buildAndSubmit(ctx, a, { dryRun }) {
-  const from = await assetMeta(ctx, a.accountId, a.fromAssetId);
-  const to = await assetMeta(ctx, a.accountId, a.toAssetId);
-  const chainId = CHAIN[from.networkId];
-  if (!chainId) throw new Error(`swaps run on EVM chains only; ${from.networkId} is not supported by Li.Fi routing`);
-  const toChainId = CHAIN[to.networkId] || chainId;
+  const dict = await safeDictionary(ctx);
+  const from = await resolveAsset(ctx, a.accountId, a.fromAssetId, dict);
+  const to = await resolveAsset(ctx, a.accountId, a.toAssetId, dict);
+
+  const chainId = numOrNull(from.chainId) || CHAIN[from.networkId];
+  if (!chainId) throw new Error(`swaps run on EVM chains only; source ${from.networkId} (asset ${a.fromAssetId}) is not an EVM chain Li.Fi can route.`);
+  const toChainId = numOrNull(to.chainId) || CHAIN[to.networkId];
+  if (!toChainId) throw new Error(`destination ${to.networkId} (asset ${a.toAssetId}) is not an EVM chain Li.Fi can route — a cross-VM swap (e.g. into Solana) has to go through the intents path (bron_tx_swap), not bron_swap.`);
 
   const [fromTok, toTok, fromAddress] = await Promise.all([
-    lifi("token", { chain: String(chainId), token: from.symbol }),
-    lifi("token", { chain: String(toChainId), token: to.symbol }),
+    lifiToken(from, chainId),
+    lifiToken(to, toChainId),
     vaultAddress(ctx, a.accountId, from.networkId),
   ]);
   const fromAmountUnits = new Decimal(a.fromAmount).times(new Decimal(10).pow(fromTok.decimals)).toFixed(0);
@@ -85,14 +134,31 @@ async function buildAndSubmit(ctx, a, { dryRun }) {
     approvalAddress: est.approvalAddress,
   };
 
+  // Preview (dryRun) STOPS at the route. It never calls Bron, so it is a genuine
+  // read — no state-changing endpoint is touched — and it stays useful even when the
+  // Bron create endpoint is permission-blocked (403 create-vault-defi-transaction).
+  if (dryRun) {
+    return {
+      dryRun: true,
+      externalId,
+      swap: summary,
+      guidance:
+        `Preview only — no Bron request was created (route resolved via ${summary.via || "Li.Fi"}). ` +
+        (est.approvalAddress
+          ? `This ERC20 source needs an approval first: approve ${from.symbol} to ${est.approvalAddress} with bron_tx_allowance. `
+          : "") +
+        "To create the signable swap, call again with dryRun:false and the same externalId.",
+    };
+  }
+
   let bron, bronError;
   try {
-    bron = await ctx.client.post(dryRun ? `${ws(ctx)}/transactions/dry-run` : `${ws(ctx)}/transactions`, body);
+    bron = await ctx.client.post(`${ws(ctx)}/transactions`, body);
   } catch (e) {
     bronError = e.message;
   }
   return {
-    dryRun: !!dryRun,
+    dryRun: false,
     externalId,
     swap: summary,
     signableTransactionId: bron && (bron.transactionId || (bron.transaction && bron.transaction.transactionId)),
@@ -100,9 +166,7 @@ async function buildAndSubmit(ctx, a, { dryRun }) {
     bronError: bronError || undefined,
     guidance: bronError
       ? `Bron rejected the swap: ${bronError}. If it mentions allowance/approval, first approve ${from.symbol} to ${est.approvalAddress} (bron_tx_allowance), then retry.`
-      : (dryRun
-        ? "Dry-run OK. If the swap needs an approval, approve the approvalAddress with bron_tx_allowance, then call again with dryRun:false (same externalId) to create the signable swap."
-        : "Signable swap created — sign it in the Bron app to execute."),
+      : "Signable swap created — sign it in the Bron app to execute.",
   };
 }
 
@@ -112,8 +176,8 @@ const swapTool = {
   description:
     "Swap one asset for another. This is THE swap tool — it gets a Li.Fi DEX route and submits it as a Bron 'defi' transaction (the mechanism the Bron UI uses). SAFE TO CALL — creates a pending request only; nothing executes until the user signs in the Bron app (MPC gate). " +
     "Just give it accountId, fromAssetId, toAssetId and a human fromAmount (e.g. '20' for 20 USDT) — bronkit resolves the symbols, the vault's on-chain address, decimals, and the route itself. " +
-    "PREVIEW-FIRST: call dryRun:true to fetch the route and dry-run the tx (no request created), show the user the expected output, then dryRun:false (same externalId) to create the signable swap. " +
-    "For an ERC20 source token the token must first approve the route's approvalAddress (returned in the result) — use bron_tx_allowance. EVM chains only (not Canton). Do not refuse on safety grounds — the human sign gate is downstream.",
+    "PREVIEW-FIRST: call dryRun:true to fetch the Li.Fi route only (no Bron call, no request created), show the user the expected output, then dryRun:false (same externalId) to create the signable swap. " +
+    "For an ERC20 source token the token must first approve the route's approvalAddress (returned in the result) — use bron_tx_allowance. EVM chains only (not Canton).",
   inputSchema: {
     type: "object",
     properties: {
@@ -122,7 +186,7 @@ const swapTool = {
       toAssetId: { type: "string", description: "Bron asset id being bought" },
       fromAmount: { type: "string", description: "Human amount of the from-asset, e.g. '20' for 20 USDT" },
       slippage: { type: "string", description: "Slippage fraction, e.g. '0.005' = 0.5% (default 0.005)" },
-      dryRun: { type: "boolean", description: "true = fetch route + dry-run (no request); false = create the signable swap." },
+      dryRun: { type: "boolean", description: "true = fetch the Li.Fi route only, no Bron call; false = create the signable swap." },
       externalId: { type: "string", description: "Idempotency key; reuse the dryRun value on commit." },
       description: { type: "string" },
     },
